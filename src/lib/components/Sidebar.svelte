@@ -7,7 +7,7 @@
     IconFolder, IconFile, IconCloud, IconChevronUp, IconChevronDown,
     IconPencil,
     IconChartBar,
-    IconVault,
+    IconLock,
   } from '@tabler/icons-svelte';
 
   type Tab = 'files' | 'generators' | 'downloader' | 'draw' | 'stats' | 'editor' | 'vault';
@@ -66,7 +66,7 @@
     { id: 'generators', icon: IconSparkles,        label: 'Generators' },
     { id: 'draw',       icon: IconPencil,           label: 'Draw'       },
     { id: 'stats',      icon: IconChartBar,          label: 'Stats'      },
-    { id: 'vault',      icon: IconVault,                label: 'Vault' }
+    { id: 'vault',      icon: IconLock,                label: 'Vault' }
   ];
   // Mobile: primary tabs shown in bottom bar, secondary in sheet
   const PRIMARY_TABS: Tab[] = ['files', 'draw', 'stats', 'vault'];
