@@ -1,21 +1,17 @@
 import type { RequestHandler } from './$types';
 import {
-  deriveVaultKey,
-  decryptJson,
-  randomBytes,
-  sha256,
-  loadVaultIndex,
+  getVaultContext,
   loadVaultRegistry,
-  saveVaultState,
   uploadVaultFileChunks,
-  VaultRegistryPlain
+  saveVaultState,
+  randomUUID
 } from '../_vault';
 
 export const POST: RequestHandler = async ({ request, locals, cookies }) => {
   const userId = locals.user?.id || 'default_user';
-  const sessionCookie = cookies.get('vault_session');
+  const ctx = await getVaultContext(userId, cookies);
 
-  if (!sessionCookie) {
+  if (!ctx) {
     return new Response('Unauthorized', { status: 401 });
   }
 
@@ -26,47 +22,36 @@ export const POST: RequestHandler = async ({ request, locals, cookies }) => {
     return new Response('No file', { status: 400 });
   }
 
-  const passHash = sessionCookie;
-  const password = String(form.get('password') || '').trim();
+  const name = String(form.get('name') || file.name).trim() || file.name;
 
-  if (!password) {
-    return new Response('Password missing for vault key derivation', { status: 400 });
-  }
-
-  const existingSaltGuess = randomBytes(16);
-  const key = await deriveVaultKey(password, existingSaltGuess);
-
-  const index = await loadVaultIndex(key);
-  if (!index || index.userId !== userId || index.hash !== passHash) {
-    return new Response('Session invalid', { status: 401 });
-  }
-
-  const registry = await loadVaultRegistry(key, index.registryFileId!);
-
+  const registry = await loadVaultRegistry(ctx.key, ctx.index.registryFileId!);
   const raw = await file.arrayBuffer();
-  const iv = randomBytes(12);
 
-  const encrypted = await crypto.subtle.encrypt(
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await globalThis.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
-    key,
+    ctx.key,
     raw
   );
 
-  const chunks = await uploadVaultFileChunks(encrypted, crypto.randomUUID());
+  const chunks = await uploadVaultFileChunks(encrypted, randomUUID());
 
-  const fileEntry = {
-    id: crypto.randomUUID(),
-    name: file.name,
+  registry.files.push({
+    id: randomUUID(),
+    name,
     size: file.size,
     createdAt: Date.now(),
     iv: Buffer.from(iv).toString('base64'),
     chunks
-  };
+  });
 
-  registry.files.push(fileEntry);
   registry.updatedAt = Date.now();
 
-  await saveVaultState(key, index, registry);
+  await saveVaultState(ctx.key, ctx.index, registry, {
+    previousRegistryMessageId: ctx.index.registryMessageId
+  });
 
-  return new Response(JSON.stringify({ ok: true, id: fileEntry.id }));
+  return new Response(JSON.stringify({ ok: true }), {
+    headers: { 'Content-Type': 'application/json' }
+  });
 };

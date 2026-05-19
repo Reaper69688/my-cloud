@@ -1,11 +1,13 @@
-import crypto from 'crypto';
+import nodeCrypto from 'crypto';
 import {
   uploadJsonToTelegram,
   uploadBytesToTelegram,
   downloadFileFromTelegram
 } from '$lib/telegramStorage';
+import { TG_SAFE_CHUNK_BYTES } from '$lib/telegramLimits';
 
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_BACKUP_CHAT_ID!;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 
 export type VaultFileChunk = {
   index: number;
@@ -29,6 +31,7 @@ export type VaultIndexPlain = {
   salt: string;
   hash: string;
   registryFileId: string | null;
+  registryMessageId: number | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -46,12 +49,19 @@ export type VaultEnvelope = {
   data: string;
 };
 
-const CHUNK_SIZE = 19.5 * 1024 * 1024;
+export type CookieLike = {
+  get(name: string): string | undefined | null;
+};
+
+const CHUNK_SIZE = TG_SAFE_CHUNK_BYTES;
+const subtle = globalThis.crypto.subtle;
 
 export function randomBytes(len: number) {
-  const arr = new Uint8Array(len);
-  crypto.getRandomValues(arr);
-  return arr;
+  return new Uint8Array(nodeCrypto.randomBytes(len));
+}
+
+export function randomUUID() {
+  return nodeCrypto.randomUUID();
 }
 
 export async function sha256(data: ArrayBuffer | Uint8Array | string) {
@@ -62,14 +72,14 @@ export async function sha256(data: ArrayBuffer | Uint8Array | string) {
         ? data
         : new Uint8Array(data);
 
-  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  const hash = await subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(hash))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 }
 
-export async function deriveVaultKey(password: string, salt: Uint8Array) {
-  const baseKey = await crypto.subtle.importKey(
+export async function deriveVaultKey(password: string, salt: Uint8Array, extractable = false) {
+  const baseKey = await subtle.importKey(
     'raw',
     new TextEncoder().encode(password),
     'PBKDF2',
@@ -77,7 +87,7 @@ export async function deriveVaultKey(password: string, salt: Uint8Array) {
     ['deriveKey']
   );
 
-  return crypto.subtle.deriveKey(
+  return subtle.deriveKey(
     {
       name: 'PBKDF2',
       salt,
@@ -86,16 +96,26 @@ export async function deriveVaultKey(password: string, salt: Uint8Array) {
     },
     baseKey,
     { name: 'AES-GCM', length: 256 },
-    false,
+    extractable,
     ['encrypt', 'decrypt']
   );
+}
+
+export async function exportVaultKey(key: CryptoKey) {
+  const raw = await subtle.exportKey('raw', key);
+  return Buffer.from(raw).toString('base64');
+}
+
+export async function importVaultKey(rawKeyB64: string) {
+  const raw = Buffer.from(rawKeyB64, 'base64');
+  return subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
 export async function encryptJson<T>(value: T, key: CryptoKey): Promise<VaultEnvelope> {
   const iv = randomBytes(12);
   const payload = new TextEncoder().encode(JSON.stringify(value));
 
-  const encrypted = await crypto.subtle.encrypt(
+  const encrypted = await subtle.encrypt(
     { name: 'AES-GCM', iv },
     key,
     payload
@@ -117,7 +137,7 @@ export async function decryptJson<T>(envelope: VaultEnvelope, key: CryptoKey): P
   const iv = Buffer.from(envelope.iv, 'base64');
   const data = Buffer.from(envelope.data, 'base64');
 
-  const decrypted = await crypto.subtle.decrypt(
+  const decrypted = await subtle.decrypt(
     { name: 'AES-GCM', iv },
     key,
     data
@@ -139,18 +159,62 @@ function splitEncrypted(buffer: ArrayBuffer) {
 }
 
 async function telegramGetPinnedMessage() {
-  const res = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/getChat?chat_id=${TELEGRAM_CHAT_ID}`);
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=${TELEGRAM_CHAT_ID}`);
   const json = await res.json();
   return json?.result?.pinned_message ?? null;
 }
 
-export async function loadVaultIndex(key: CryptoKey): Promise<VaultIndexPlain | null> {
+async function telegramDeleteMessage(message_id: number) {
+  if (!message_id || message_id <= 0) return;
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      message_id
+    })
+  }).catch(() => {});
+}
+
+async function deleteManyMessages(ids: Array<number | null | undefined>) {
+  const unique = [...new Set(ids.filter((id): id is number => typeof id === 'number' && id > 0))];
+  for (const id of unique) {
+    await telegramDeleteMessage(id);
+  }
+}
+
+export async function loadVaultIndex(): Promise<VaultIndexPlain | null> {
   const pinned = await telegramGetPinnedMessage();
   if (!pinned?.document?.file_id) return null;
 
-  const downloaded = await downloadFileFromTelegram(pinned.document.file_id);
-  const env = JSON.parse(downloaded.data.toString('utf8')) as VaultEnvelope;
-  return decryptJson<VaultIndexPlain>(env, key);
+  try {
+    const downloaded = await downloadFileFromTelegram(pinned.document.file_id);
+    const text = downloaded.data.toString('utf8');
+    const parsed = JSON.parse(text) as Partial<VaultIndexPlain>;
+
+    if (
+      !parsed ||
+      parsed.version !== 1 ||
+      typeof parsed.userId !== 'string' ||
+      typeof parsed.salt !== 'string' ||
+      typeof parsed.hash !== 'string'
+    ) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      userId: parsed.userId,
+      salt: parsed.salt,
+      hash: parsed.hash,
+      registryFileId: typeof parsed.registryFileId === 'string' ? parsed.registryFileId : null,
+      registryMessageId: typeof parsed.registryMessageId === 'number' ? parsed.registryMessageId : null,
+      createdAt: typeof parsed.createdAt === 'number' ? parsed.createdAt : Date.now(),
+      updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : Date.now()
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function loadVaultRegistry(key: CryptoKey, registryFileId: string): Promise<VaultRegistryPlain> {
@@ -162,45 +226,70 @@ export async function loadVaultRegistry(key: CryptoKey, registryFileId: string):
 export async function saveVaultState(
   key: CryptoKey,
   index: VaultIndexPlain,
-  registry: VaultRegistryPlain
+  registry: VaultRegistryPlain,
+  cleanup?: {
+    previousRegistryMessageId?: number | null;
+  }
 ) {
-  const encryptedRegistry = await encryptJson(registry, key);
-  const registryUpload = await uploadJsonToTelegram(
-    encryptedRegistry,
-    `vault_registry_${index.userId}.enc.json`
-  );
+  const previousPinned = await telegramGetPinnedMessage().catch(() => null);
+  const previousIndexMessageId = previousPinned?.message_id ?? null;
 
-  if (!registryUpload?.file_id) {
-    throw new Error('Registry upload failed');
+  let registryUpload: { message_id: number; file_id: string } | null = null;
+  let indexUpload: { message_id: number; file_id: string } | null = null;
+
+  try {
+    const encryptedRegistry = await encryptJson(registry, key);
+    registryUpload = await uploadJsonToTelegram(
+      encryptedRegistry,
+      `vault_registry_${index.userId}.enc.json`
+    );
+
+    if (!registryUpload?.file_id) {
+      throw new Error('Registry upload failed');
+    }
+
+    index.registryFileId = registryUpload.file_id;
+    index.registryMessageId = registryUpload.message_id;
+    index.updatedAt = Date.now();
+
+    indexUpload = await uploadJsonToTelegram(
+      index,
+      `vault_index_${index.userId}.json`
+    );
+
+    if (!indexUpload?.file_id) {
+      throw new Error('Index upload failed');
+    }
+
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/pinChatMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        message_id: indexUpload.message_id,
+        disable_notification: true
+      })
+    });
+
+    await deleteManyMessages([
+      previousIndexMessageId,
+      cleanup?.previousRegistryMessageId
+    ].filter((id): id is number => typeof id === 'number' && id > 0 && id !== indexUpload?.message_id));
+
+    return {
+      indexFileId: indexUpload.file_id,
+      indexMessageId: indexUpload.message_id,
+      registryFileId: registryUpload.file_id,
+      registryMessageId: registryUpload.message_id
+    };
+  } catch (err) {
+    await deleteManyMessages([
+      indexUpload?.message_id,
+      registryUpload?.message_id
+    ]);
+
+    throw err;
   }
-
-  index.registryFileId = registryUpload.file_id;
-  index.updatedAt = Date.now();
-
-  const encryptedIndex = await encryptJson(index, key);
-  const indexUpload = await uploadJsonToTelegram(
-    encryptedIndex,
-    `vault_index_${index.userId}.enc.json`
-  );
-
-  if (!indexUpload?.file_id) {
-    throw new Error('Index upload failed');
-  }
-
-  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/pinChatMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      message_id: indexUpload.message_id,
-      disable_notification: true
-    })
-  });
-
-  return {
-    indexFileId: indexUpload.file_id,
-    registryFileId: registryUpload.file_id
-  };
 }
 
 export async function uploadVaultFileChunks(
@@ -209,27 +298,35 @@ export async function uploadVaultFileChunks(
 ): Promise<VaultFileChunk[]> {
   const chunks = splitEncrypted(encryptedFile);
   const results: VaultFileChunk[] = [];
+  const uploadedMessageIds: number[] = [];
 
-  for (let i = 0; i < chunks.length; i++) {
-    const part = chunks[i];
-    const uploaded = await uploadBytesToTelegram(
-      Buffer.from(part),
-      `${baseName}.chunk${i}.bin`
-    );
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      const part = chunks[i];
+      const uploaded = await uploadBytesToTelegram(
+        Buffer.from(part),
+        `${baseName}.chunk${i}.bin`
+      );
 
-    if (!uploaded?.file_id) {
-      throw new Error(`Chunk upload failed at ${i}`);
+      if (!uploaded?.file_id) {
+        throw new Error(`Chunk upload failed at ${i}`);
+      }
+
+      results.push({
+        index: i,
+        file_id: uploaded.file_id,
+        message_id: uploaded.message_id,
+        size: part.byteLength
+      });
+
+      uploadedMessageIds.push(uploaded.message_id);
     }
 
-    results.push({
-      index: i,
-      file_id: uploaded.file_id,
-      message_id: uploaded.message_id,
-      size: part.byteLength
-    });
+    return results;
+  } catch (err) {
+    await deleteManyMessages(uploadedMessageIds);
+    throw err;
   }
-
-  return results;
 }
 
 export async function decryptVaultFile(
@@ -237,9 +334,26 @@ export async function decryptVaultFile(
   ivB64: string,
   encrypted: ArrayBuffer
 ) {
-  return crypto.subtle.decrypt(
+  return subtle.decrypt(
     { name: 'AES-GCM', iv: Buffer.from(ivB64, 'base64') },
     key,
     encrypted
   );
+}
+
+export async function getVaultContext(userId: string | undefined, cookies: CookieLike) {
+  const sessionHash = (cookies.get('vault_session') ?? '').trim();
+  const rawKey = (cookies.get('vault_key') ?? '').trim();
+
+  if (!userId || !sessionHash || !rawKey) return null;
+
+  const index = await loadVaultIndex();
+  if (!index || index.userId !== userId || index.hash !== sessionHash) return null;
+
+  const key = await importVaultKey(rawKey).catch(() => null);
+  if (!key) return null;
+
+  if (!index.registryFileId) return null;
+
+  return { index, key };
 }

@@ -1,7 +1,6 @@
 import type { RequestHandler } from './$types';
 import {
-  deriveVaultKey,
-  loadVaultIndex,
+  getVaultContext,
   loadVaultRegistry,
   decryptVaultFile
 } from '../_vault';
@@ -9,22 +8,14 @@ import { downloadFileFromTelegram } from '$lib/telegramStorage';
 
 export const GET: RequestHandler = async ({ url, locals, cookies }) => {
   const userId = locals.user?.id || 'default_user';
-  const session = cookies.get('vault_session');
-  const password = url.searchParams.get('password')?.trim() || '';
+  const ctx = await getVaultContext(userId, cookies);
   const fileId = url.searchParams.get('id');
 
-  if (!session || !password || !fileId) {
+  if (!ctx || !fileId) {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  const key = await deriveVaultKey(password, new Uint8Array(16));
-  const index = await loadVaultIndex(key);
-
-  if (!index || index.userId !== userId || index.hash !== session) {
-    return new Response('Session invalid', { status: 401 });
-  }
-
-  const registry = await loadVaultRegistry(key, index.registryFileId!);
+  const registry = await loadVaultRegistry(ctx.key, ctx.index.registryFileId!);
   const file = registry.files.find((f) => f.id === fileId);
 
   if (!file) {
@@ -33,12 +24,14 @@ export const GET: RequestHandler = async ({ url, locals, cookies }) => {
 
   const chunks: ArrayBuffer[] = [];
 
-  for (const chunk of file.chunks) {
+  for (const chunk of [...file.chunks].sort((a, b) => a.index - b.index)) {
     const downloaded = await downloadFileFromTelegram(chunk.file_id);
-    chunks.push(downloaded.data.buffer.slice(
-      downloaded.data.byteOffset,
-      downloaded.data.byteOffset + downloaded.data.byteLength
-    ));
+    chunks.push(
+      downloaded.data.buffer.slice(
+        downloaded.data.byteOffset,
+        downloaded.data.byteOffset + downloaded.data.byteLength
+      )
+    );
   }
 
   const total = chunks.reduce((sum, b) => sum + b.byteLength, 0);
@@ -50,7 +43,7 @@ export const GET: RequestHandler = async ({ url, locals, cookies }) => {
     offset += c.byteLength;
   }
 
-  const decrypted = await decryptVaultFile(key, file.iv, merged.buffer);
+  const decrypted = await decryptVaultFile(ctx.key, file.iv, merged.buffer);
 
   return new Response(decrypted, {
     headers: {
