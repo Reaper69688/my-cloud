@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import axios from 'axios';
 import { generateApiKeyForDiscordId } from '$lib/telegramStorage';
 
-const ALLOWED_IDS = new Set(['756529025719074846']);
+const ALLOWED_IDS = new Set([import.meta.env.OWNER_ID!]);
 
 const BASE_URL =
   import.meta.env.PUBLIC_BASE_URL ?? 'http://localhost:5173';
