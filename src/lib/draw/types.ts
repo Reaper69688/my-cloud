@@ -27,6 +27,11 @@ export type Stroke = {
   ey?: number;
   text?: string;
   fontSize?: number;
+  fontFamily?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  textAlign?: "left" | "center" | "right";
+  lineHeight?: number;
   layerId: string;
   variableWidthPath?: string;
   brushAngle?: number;

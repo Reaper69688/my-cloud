@@ -297,14 +297,21 @@ export function shapeAttrs(s: Stroke) {
       return { cx: (s.sx + s.ex) / 2, cy: (s.sy + s.ey) / 2, rx: sw / 2, ry: sh / 2 };
     case "arrow": {
       const angle = Math.atan2(s.ey - s.sy, s.ex - s.sx);
-      const headLen = Math.min(20, Math.sqrt(sw * sw + sh * sh) * 0.3);
-      const a = Math.PI / 6;
+      const len = Math.sqrt(Math.abs(s.ex - s.sx) ** 2 + Math.abs(s.ey - s.sy) ** 2);
+      const headLen = Math.min(len * 0.35, sw * 4);
+      const headW = headLen * 0.65;
+      const a = Math.PI / 2;
+      // Filled arrowhead
+      const hx = s.ex - headLen * Math.cos(angle);
+      const hy = s.ey - headLen * Math.sin(angle);
+      const lx = hx - headW * Math.cos(angle - a);
+      const ly = hy - headW * Math.sin(angle - a);
+      const rx = hx - headW * Math.cos(angle + a);
+      const ry = hy - headW * Math.sin(angle + a);
       return {
-        x1: s.sx, y1: s.sy, x2: s.ex, y2: s.ey,
-        headX1: s.ex - headLen * Math.cos(angle - a),
-        headY1: s.ey - headLen * Math.sin(angle - a),
-        headX2: s.ex - headLen * Math.cos(angle + a),
-        headY2: s.ey - headLen * Math.sin(angle + a),
+        x1: s.sx, y1: s.sy, x2: hx, y2: hy,
+        headX1: lx, headY1: ly, headX2: rx, headY2: ry,
+        headLen, headW,
       };
     }
     case "triangle": {

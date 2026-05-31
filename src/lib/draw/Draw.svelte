@@ -11,6 +11,7 @@
   import type { Tool, Point, Stroke, Layer, BrushPreset, HistoryEntry, CanvasSettings } from "./types";
   import { BRUSH_PRESETS } from "./presets";
   import { Stabilizer, applyPressureCurve, smoothPath, variableWidthPath, generatePencilPaths, shapeAttrs, escapeXml, minDistFilter } from "./engine";
+  import ColorPicker from "./ColorPicker.svelte";
 
   let { apiKey }: { apiKey: string } = $props();
 
@@ -82,6 +83,27 @@
   let scatter = $state(0);
   let fillShapes = $state(false);
   let fontSize = $state(32);
+  let fontFamily = $state("sans-serif");
+  let fontWeight = $state("400");
+  let fontStyle = $state("normal");
+  let textAlign = $state<"left" | "center" | "right">("left");
+
+  // ── Inline text editor state ────────────────────────────────────────
+  let textEditing = $state(false);
+  let textEditX = $state(0);
+  let textEditY = $state(0);
+  let textEditContent = $state("");
+  let textEditScreenX = $state(0);
+  let textEditScreenY = $state(0);
+  let textEditEl: HTMLTextAreaElement | null = $state(null);
+
+  const FONT_FAMILIES = [
+    "sans-serif", "serif", "monospace", "cursive", "fantasy",
+    "Arial", "Helvetica", "Georgia", "Times New Roman", "Courier New",
+    "Verdana", "Trebuchet MS", "Impact", "Comic Sans MS",
+    "Fira Code", "Geist Mono", "Inter", "Roboto", "Open Sans",
+    "Montserrat", "Playfair Display", "Pacifico", "Lobster",
+  ];
 
   function applyPreset(p: BrushPreset) {
     const idx = BRUSH_PRESETS.indexOf(p);
@@ -260,16 +282,19 @@
 
     if (tool === "text") {
       const pt = svgPoint(e);
-      const text = prompt("Enter text:");
-      if (!text) return;
-      const s: Stroke = {
-        id: uid(), tool, color: fgColor, baseWidth: lineWidth,
-        opacity: opacity / 100, fill: false,
-        points: [pt], text, fontSize, layerId: getActiveLayer().id,
-      };
-      getActiveLayer().strokes = [...getActiveLayer().strokes, s];
-      pushHistory({ action: "stroke", layerId: getActiveLayer().id, strokes: [s] });
-      layers = [...layers];
+      if (textEditing) {
+        commitText();
+        return;
+      }
+      const rect = canvasWrap.getBoundingClientRect();
+      const svgRect = svgEl.getBoundingClientRect();
+      textEditX = pt.x;
+      textEditY = pt.y;
+      textEditScreenX = svgRect.left - rect.left + pt.x * zoom;
+      textEditScreenY = svgRect.top - rect.top + pt.y * zoom;
+      textEditContent = "";
+      textEditing = true;
+      setTimeout(() => textEditEl?.focus(), 10);
       return;
     }
 
@@ -371,6 +396,28 @@
     currentVWPath = "";
   }
 
+  function commitText() {
+    if (!textEditing || !textEditContent.trim()) { textEditing = false; return; }
+    const lines = textEditContent.split("\n");
+    const s: Stroke = {
+      id: uid(), tool: "text", color: fgColor, baseWidth: lineWidth,
+      opacity: opacity / 100, fill: false,
+      points: [{ x: textEditX, y: textEditY, pressure: 0.5, time: performance.now() }],
+      text: textEditContent, fontSize, fontFamily, fontWeight, fontStyle, textAlign,
+      layerId: getActiveLayer().id,
+    };
+    getActiveLayer().strokes = [...getActiveLayer().strokes, s];
+    pushHistory({ action: "stroke", layerId: getActiveLayer().id, strokes: [s] });
+    layers = [...layers];
+    textEditing = false;
+    textEditContent = "";
+  }
+
+  function onTextKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") { textEditing = false; textEditContent = ""; }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); }
+  }
+
   // ── Eyedropper ──────────────────────────────────────────────────────
   function pickColor(e: PointerEvent) {
     if (!svgEl) return;
@@ -405,14 +452,24 @@
         case "ellipse":
           return `<ellipse cx="${a.cx}" cy="${a.cy}" rx="${a.rx}" ry="${a.ry}" fill="${s.fill ? s.color : 'none'}" stroke="${s.fill ? 'none' : s.color}" stroke-width="${sw}" opacity="${op}"/>`;
         case "arrow":
-          return `<line x1="${a.x1}" y1="${a.y1}" x2="${a.x2}" y2="${a.y2}" stroke="${s.color}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/><polygon points="${a.x2},${a.y2} ${a.headX1},${a.headY1} ${a.headX2},${a.headY2}" fill="${s.color}" opacity="${op}"/>`;
+          return `<line x1="${a.x1}" y1="${a.y1}" x2="${a.x2}" y2="${a.y2}" stroke="${s.color}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/><polygon points="${a.x2},${a.y2} ${a.headX1},${a.headY1} ${a.headX2},${a.headY2}" fill="${s.color}" opacity="${op}" stroke-linejoin="round"/>`;
         case "triangle":
           return `<polygon points="${a.points}" fill="${s.fill ? s.color : 'none'}" stroke="${s.fill ? 'none' : s.color}" stroke-width="${sw}" stroke-linejoin="round" opacity="${op}"/>`;
       }
     }
 
     if (s.text) {
-      return `<text x="${s.points[0]?.x}" y="${s.points[0]?.y}" fill="${s.color}" font-size="${s.fontSize ?? 32}" font-family="sans-serif" opacity="${op}">${escapeXml(s.text)}</text>`;
+      const anchor = s.textAlign === "center" ? "middle" : s.textAlign === "right" ? "end" : "start";
+      const tx = s.textAlign === "center" ? s.points[0]?.x : s.textAlign === "right" ? s.points[0]?.x : s.points[0]?.x;
+      const lines = s.text.split("\n");
+      const lh = (s.fontSize ?? 32) * 1.2;
+      let txt = "";
+      for (let i = 0; i < lines.length; i++) {
+        const ty = s.points[0]?.y + (i + 1) * lh;
+        const escaped = escapeXml(lines[i]);
+        txt += `<tspan x="${s.points[0]?.x}" dy="${i === 0 ? 0 : lh}" text-anchor="${anchor}">${escaped}</tspan>`;
+      }
+      return `<text x="${s.points[0]?.x}" y="${s.points[0]?.y}" fill="${s.color}" font-size="${s.fontSize ?? 32}" font-family="${s.fontFamily ?? 'sans-serif'}" font-weight="${s.fontWeight ?? '400'}" font-style="${s.fontStyle ?? 'normal'}" text-anchor="${anchor}" opacity="${op}" dominant-baseline="auto">${txt}</text>`;
     }
 
     // Variable-width path (pro rendering)
@@ -688,9 +745,99 @@
   }
 </script>
 
+  // ── Menu state ──────────────────────────────────────────────────────
+  let openMenu = $state<string | null>(null);
+
+  function menuAction(action: string) {
+    openMenu = null;
+    switch (action) {
+      case "new": clearAll(); break;
+      case "save-png": downloadPng(); break;
+      case "save-svg": downloadSvg(); break;
+      case "save-cloud": saveToCloud(); break;
+      case "undo": undo(); break;
+      case "redo": redo(); break;
+      case "clear": clearAll(); break;
+      case "fit": fitToScreen(); break;
+      case "zoom-100": zoomTo(1); break;
+      case "zoom-in": zoomTo(Math.min(MAX_ZOOM, zoom * 1.5)); break;
+      case "zoom-out": zoomTo(Math.max(MIN_ZOOM, zoom / 1.5)); break;
+      case "grid": settings.showGrid = !settings.showGrid; break;
+      case "rulers": settings.showRulers = !settings.showRulers; break;
+      case "flip-h": /* TODO */ break;
+      case "flip-v": /* TODO */ break;
+    }
+  }
+</script>
+
 <svelte:window onkeydown={onkeydown} onkeyup={onkeyup}/>
 
-<div class="draw-root" role="application" tabindex="-1">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="draw-root" role="application" tabindex="-1" onclick={() => { if (openMenu) openMenu = null; }}>
+  <!-- ═══ TOP MENU BAR ═══ -->
+  <div class="menu-bar">
+    {#each [
+      { label: "File", items: [
+        { label: "New Canvas", action: "new", key: "" },
+        { label: "---" },
+        { label: "Save PNG", action: "save-png", key: "" },
+        { label: "Save SVG", action: "save-svg", key: "" },
+        { label: "Save to Cloud", action: "save-cloud", key: "" },
+      ]},
+      { label: "Edit", items: [
+        { label: "Undo", action: "undo", key: "Ctrl+Z" },
+        { label: "Redo", action: "redo", key: "Ctrl+Shift+Z" },
+        { label: "---" },
+        { label: "Clear Layer", action: "clear", key: "" },
+      ]},
+      { label: "View", items: [
+        { label: "Fit to Screen", action: "fit", key: "Ctrl+0" },
+        { label: "Zoom 100%", action: "zoom-100", key: "" },
+        { label: "Zoom In", action: "zoom-in", key: "Ctrl+=" },
+        { label: "Zoom Out", action: "zoom-out", key: "Ctrl+-" },
+        { label: "---" },
+        { label: settings.showGrid ? "✓ Grid" : "  Grid", action: "grid", key: "G" },
+        { label: settings.showRulers ? "✓ Rulers" : "  Rulers", action: "rulers", key: "R" },
+      ]},
+      { label: "Image", items: [
+        { label: "Canvas Size: {w}×{h}", action: "", key: "" },
+        { label: "---" },
+        { label: "Flip Horizontal", action: "flip-h", key: "" },
+        { label: "Flip Vertical", action: "flip-v", key: "" },
+      ]},
+      { label: "Help", items: [
+        { label: "Shortcuts: B/N/P/E/L/U/O/A/I/G/T", action: "", key: "" },
+        { label: "[ / ] = brush size", action: "", key: "" },
+        { label: "X = swap colors", action: "", key: "" },
+        { label: "Space+drag = pan", action: "", key: "" },
+        { label: "Ctrl+scroll = zoom", action: "", key: "" },
+      ]},
+    ] as menu}
+      <div class="mb-item" onclick={(e) => { e.stopPropagation(); openMenu = openMenu === menu.label ? null : menu.label; }}>
+        <span class="mb-label">{menu.label}</span>
+        {#if openMenu === menu.label}
+          <div class="mb-dropdown">
+            {#each menu.items as item}
+              {#if item.label === "---"}
+                <div class="mb-sep"></div>
+              {:else}
+                <button class="mb-option" onclick={(e) => { e.stopPropagation(); menuAction(item.action); }}>
+                  <span>{item.label}</span>
+                  {#if item.key}<span class="mb-key">{item.key}</span>{/if}
+                </button>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/each}
+    <div class="mb-spacer"></div>
+    <span class="mb-title">{w}×{h}</span>
+    <span class="mb-sep-inline"></span>
+    <span class="mb-title">{Math.round(zoom * 100)}%</span>
+  </div>
+
+  <div class="main-row">
   <!-- ═══ LEFT TOOLBAR ═══ -->
   <div class="tool-sidebar">
     {#each TOOL_GROUPS as group, gi}
@@ -714,12 +861,8 @@
     <button class="ts-btn" onclick={clearAll} title="Clear layer"><IconTrash size={16}/></button>
     <div class="ts-spacer"></div>
     <!-- Color swatches -->
-    <button class="ts-swatch ts-fg" style="background:{fgColor}" title="Foreground">
-      <input type="color" bind:value={fgColor} class="ts-color-hid"/>
-    </button>
-    <button class="ts-swatch ts-bg" style="background:{bgColor2}" title="Background">
-      <input type="color" bind:value={bgColor2} class="ts-color-hid"/>
-    </button>
+    <button class="ts-swatch ts-fg" style="background:{fgColor}" onclick={() => rightPanel = 'color'} title="Foreground color"></button>
+    <button class="ts-swatch ts-bg" style="background:{bgColor2}" onclick={() => rightPanel = 'color'} title="Background color"></button>
     <button class="ts-swap" onclick={swapColors} title="Swap (X)">
       <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 3L4 0V2H9V4H4V6L1 3Z" fill="currentColor" transform="rotate(180 5 3)"/></svg>
     </button>
@@ -756,10 +899,23 @@
         <label class="ob-check"><input type="checkbox" bind:checked={pressureOpacity}/> Pressure→Opacity</label>
       {/if}
       {#if tool === "text"}
-        <label class="ob-label">Font
+        <label class="ob-label">Size
           <input type="range" min="8" max="200" bind:value={fontSize} class="ob-slider"/>
           <span class="ob-val">{fontSize}px</span>
         </label>
+        <label class="ob-label">Font
+          <select bind:value={fontFamily} class="ob-select">
+            {#each FONT_FAMILIES as f}
+              <option value={f} style="font-family:{f}">{f}</option>
+            {/each}
+          </select>
+        </label>
+        <button class="ob-btn" class:active={fontWeight === "700"} onclick={() => fontWeight = fontWeight === "700" ? "400" : "700"} title="Bold">B</button>
+        <button class="ob-btn ob-italic" class:active={fontStyle === "italic"} onclick={() => fontStyle = fontStyle === "italic" ? "normal" : "italic"} title="Italic">I</button>
+        <div class="ob-sep"></div>
+        <button class="ob-btn" class:active={textAlign === "left"} onclick={() => textAlign = "left"} title="Align left">≡</button>
+        <button class="ob-btn" class:active={textAlign === "center"} onclick={() => textAlign = "center"} title="Align center">☰</button>
+        <button class="ob-btn" class:active={textAlign === "right"} onclick={() => textAlign = "right"} title="Align right">≡</button>
       {/if}
       {#if ["line","rect","ellipse","arrow","triangle"].includes(tool)}
         <label class="ob-check"><input type="checkbox" bind:checked={fillShapes}/> Fill</label>
@@ -933,7 +1089,22 @@
               <div class="rp-pinfo">
                 <span class="rp-pn">{p.name}</span>
                 <span class="rp-ps">{p.size}px · {p.hardness}%</span>
-              </div>
+        <!-- Inline text editor -->
+        {#if textEditing}
+          <div class="text-editor-overlay" style="left:{textEditScreenX}px;top:{textEditScreenY}px">
+            <textarea
+              bind:this={textEditEl}
+              bind:value={textEditContent}
+              onkeydown={onTextKeydown}
+              onblur={commitText}
+              class="text-editor-input"
+              style="font-size:{fontSize * zoom}px;font-family:{fontFamily};font-weight:{fontWeight};font-style:{fontStyle};text-align:{textAlign};color:{fgColor};"
+              placeholder="Type here..."
+              rows="1"
+            ></textarea>
+          </div>
+        {/if}
+      </div>
             </button>
           {/each}
         </div>
@@ -942,19 +1113,28 @@
         <label class="rp-slider">Angle<input type="range" min="-90" max="90" bind:value={brushAngle}/><span>{brushAngle}°</span></label>
         <label class="rp-slider">Scatter<input type="range" min="0" max="3" step="0.1" bind:value={scatter}/><span>{scatter.toFixed(1)}</span></label>
 
-      {:else if rightPanel === "color"}
-        <div class="rp-color-preview">
-          <div class="rp-fg-big" style="background:{fgColor}"></div>
-          <div class="rp-bg-big" style="background:{bgColor2}"></div>
-        </div>
-        <input type="color" bind:value={fgColor} class="rp-color-input"/>
-        <label class="rp-label">Hex <input type="text" bind:value={fgColor} class="rp-hex" maxlength="7"/></label>
-        <p class="rp-heading">Recent</p>
-        <div class="rp-recent">
-          {#each recentColors as c}
-            <button class="rp-rswatch" style="background:{c}" onclick={() => { fgColor = c; }} title={c}></button>
+        <p class="rp-heading">Quick Colors</p>
+        <div class="rp-quick-colors">
+          {#each ["#000000","#ffffff","#ff0000","#ff8800","#ffff00","#00ff00","#00ccff","#0066ff","#9933ff","#ff00ff","#888888","#444444"] as c}
+            <button class="rp-qc" style="background:{c}" class:active={fgColor === c} onclick={() => { fgColor = c; }}></button>
           {/each}
         </div>
+
+        <p class="rp-heading">Brush Info</p>
+        <div class="rp-info-grid">
+          <span class="rp-info-label">Size</span><span class="rp-info-val">{lineWidth.toFixed(1)}px</span>
+          <span class="rp-info-label">Opacity</span><span class="rp-info-val">{opacity}%</span>
+          <span class="rp-info-label">Hardness</span><span class="rp-info-val">{hardness}%</span>
+          <span class="rp-info-label">Smoothing</span><span class="rp-info-val">{Math.round(smoothing*100)}%</span>
+          <span class="rp-info-label">Taper</span><span class="rp-info-val">{Math.round(taper*100)}%</span>
+          <span class="rp-info-label">P→Size</span><span class="rp-info-val">{pressureSize ? 'On' : 'Off'}</span>
+          <span class="rp-info-label">P→Opacity</span><span class="rp-info-val">{pressureOpacity ? 'On' : 'Off'}</span>
+        </div>
+
+      {:else if rightPanel === "color"}
+        <ColorPicker bind:value={fgColor}/>
+        <div class="rp-heading" style="margin-top:8px">BG Color</div>
+        <ColorPicker bind:value={bgColor2}/>
 
       {:else if rightPanel === "layers"}
         <div class="rp-layer-actions">
@@ -982,10 +1162,38 @@
       {/if}
     </div>
   </div>
+  </div>
 </div>
 
 <style>
-  .draw-root { display: flex; height: 100%; width: 100%; overflow: hidden; background: #1a1a1e; user-select: none; }
+  .draw-root { display: flex; flex-direction: column; height: 100%; width: 100%; overflow: hidden; background: #1a1a1e; user-select: none; }
+
+  /* ═══ TOP MENU BAR ═══ */
+  .menu-bar { display: flex; align-items: center; background: #1e1e22; border-bottom: 1px solid #333; height: 26px; flex-shrink: 0; padding: 0 4px; }
+  .mb-item { position: relative; padding: 3px 8px; font-size: 11px; color: #aaa; cursor: pointer; border-radius: 3px; transition: .1s; }
+  .mb-item:hover { background: #333; color: #fff; }
+  .mb-dropdown {
+    position: absolute; top: 100%; left: 0; z-index: 100;
+    background: #2a2a2e; border: 1px solid #444; border-radius: 6px;
+    padding: 4px 0; min-width: 200px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.5);
+  }
+  .mb-option {
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; padding: 5px 12px; border: none; background: none;
+    color: #ccc; font-size: 11px; cursor: pointer; text-align: left;
+    font-family: 'Geist', sans-serif;
+  }
+  .mb-option:hover { background: #6366f1; color: #fff; }
+  .mb-key { font-size: 10px; color: #666; font-family: 'Geist Mono', monospace; }
+  .mb-option:hover .mb-key { color: rgba(255,255,255,.6); }
+  .mb-sep { height: 1px; background: #444; margin: 3px 8px; }
+  .mb-spacer { flex: 1; }
+  .mb-title { font-size: 10px; color: #555; font-family: 'Geist Mono', monospace; }
+  .mb-sep-inline { width: 1px; height: 12px; background: #444; margin: 0 6px; }
+
+  /* ═══ MAIN ROW ═══ */
+  .main-row { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 
   /* ═══ LEFT TOOLBAR ═══ */
   .tool-sidebar { display: flex; flex-direction: column; align-items: center; width: 40px; background: #222226; border-right: 1px solid #333; padding: 4px 0; gap: 1px; flex-shrink: 0; }
@@ -1105,4 +1313,15 @@
   .rp-lname { flex: 1; }
   .rp-lcount { font-size: 9px; color: #444; }
   .rp-lay-opacity { padding: 2px 0; }
+
+  /* Quick colors */
+  .rp-quick-colors { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
+  .rp-qc { width: 100%; aspect-ratio: 1; border-radius: 3px; border: 1px solid #444; cursor: pointer; transition: .1s; }
+  .rp-qc:hover { border-color: #888; transform: scale(1.1); }
+  .rp-qc.active { border-color: #fff; box-shadow: 0 0 0 1px #6366f1; }
+
+  /* Info grid */
+  .rp-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; font-size: 10px; }
+  .rp-info-label { color: #555; }
+  .rp-info-val { color: #999; text-align: right; font-family: 'Geist Mono', monospace; font-size: 9px; }
 </style>
