@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount } from "svelte";
   import {
     IconPencil, IconEraser, IconSquare, IconCircle,
     IconMinus, IconArrowBack, IconArrowForward,
@@ -30,10 +30,6 @@
   let canvasRotation = $state(0);
   const MIN_ZOOM = 0.05;
   const MAX_ZOOM = 32;
-  let wrapW = $state(0);
-  let wrapH = $state(0);
-  let svgOffsetX = $derived((wrapW - w * zoom) / 2 + panX);
-  let svgOffsetY = $derived((wrapH - h * zoom) / 2 + panY);
 
   // ── Cursor ──────────────────────────────────────────────────────────
   let cursorX = $state(0);
@@ -236,12 +232,10 @@
 
   // ── SVG coords ──────────────────────────────────────────────────────
   function svgPoint(e: PointerEvent): Point {
-    const rect = canvasWrap.getBoundingClientRect();
-    const ox = (rect.width - w * zoom) / 2 + panX;
-    const oy = (rect.height - h * zoom) / 2 + panY;
+    const rect = svgEl.getBoundingClientRect();
     return {
-      x: (e.clientX - rect.left - ox) / zoom,
-      y: (e.clientY - rect.top - oy) / zoom,
+      x: (e.clientX - rect.left) / zoom,
+      y: (e.clientY - rect.top) / zoom,
       pressure: e.pressure || 0.5,
       time: performance.now(),
     };
@@ -523,11 +517,17 @@
     }
   }
 
-  function zoomTo(z: number) { zoomAt(z / zoom - 1, wrapW / 2, wrapH / 2); }
+  function zoomTo(z: number) {
+    const rect = canvasWrap?.getBoundingClientRect();
+    if (rect) zoomAt(z / zoom - 1, rect.width / 2, rect.height / 2);
+    else zoom = z;
+  }
 
   function fitToScreen() {
-    if (!wrapW || !wrapH) return;
-    zoom = Math.min((wrapW - 60) / w, (wrapH - 60) / h);
+    const cw = canvasWrap?.getBoundingClientRect().width;
+    const ch = canvasWrap?.getBoundingClientRect().height;
+    if (!cw || !ch) return;
+    zoom = Math.min((cw - 40) / w, (ch - 40) / h);
     panX = 0; panY = 0;
   }
 
@@ -574,20 +574,9 @@
 
   // ── Init ────────────────────────────────────────────────────────────
   onMount(() => {
-    tick().then(() => {
-      if (!canvasWrap) return;
-      const rect = canvasWrap.getBoundingClientRect();
-      wrapW = rect.width;
-      wrapH = rect.height;
-      fitToScreen();
-    });
-    const ro = new ResizeObserver(() => {
-      if (!canvasWrap) return;
-      const rect = canvasWrap.getBoundingClientRect();
-      wrapW = rect.width;
-      wrapH = rect.height;
-    });
+    const ro = new ResizeObserver(() => { fitToScreen(); });
     ro.observe(canvasWrap);
+    fitToScreen();
     return () => ro.disconnect();
   });
 
@@ -604,7 +593,6 @@
 
   // ── Ruler actions ───────────────────────────────────────────────────
   function rulerHAction(canvas: HTMLCanvasElement, params: () => any) {
-    let ro: ResizeObserver;
     function draw() {
       const p = params();
       const ctx = canvas.getContext("2d");
@@ -620,13 +608,18 @@
       ctx.clearRect(0, 0, cw, ch);
       ctx.fillStyle = "#26262a";
       ctx.fillRect(0, 0, cw, ch);
+      // Get SVG position within container
+      const svgRect = svgEl?.getBoundingClientRect();
+      const wrapRect = canvasWrap?.getBoundingClientRect();
+      if (!svgRect || !wrapRect) return;
+      const svgLeft = svgRect.left - wrapRect.left + p.panX;
+      const step = p.zoom > 2 ? 25 : p.zoom > 0.8 ? 50 : 100;
       ctx.fillStyle = "#555";
       ctx.font = "9px monospace";
       ctx.strokeStyle = "#444";
       ctx.lineWidth = 0.5;
-      const step = p.step;
-      for (let px = p.svgOffsetX % (step * p.zoom); px < cw; px += step * p.zoom) {
-        const val = Math.round((px - p.svgOffsetX) / p.zoom);
+      for (let px = svgLeft % (step * p.zoom); px < cw; px += step * p.zoom) {
+        const val = Math.round((px - svgLeft) / p.zoom);
         if (val >= 0 && val <= p.w) {
           ctx.beginPath();
           ctx.moveTo(px, ch - 6);
@@ -642,7 +635,7 @@
       ctx.stroke();
     }
     draw();
-    return { update() { draw(); }, destroy() { ro?.disconnect(); } };
+    return { update() { draw(); }, destroy() {} };
   }
 
   function rulerVAction(canvas: HTMLCanvasElement, params: () => any) {
@@ -661,13 +654,17 @@
       ctx.clearRect(0, 0, cw, ch);
       ctx.fillStyle = "#26262a";
       ctx.fillRect(0, 0, cw, ch);
+      const svgRect = svgEl?.getBoundingClientRect();
+      const wrapRect = canvasWrap?.getBoundingClientRect();
+      if (!svgRect || !wrapRect) return;
+      const svgTop = svgRect.top - wrapRect.top + p.panY;
+      const step = p.zoom > 2 ? 25 : p.zoom > 0.8 ? 50 : 100;
       ctx.fillStyle = "#555";
       ctx.font = "9px monospace";
       ctx.strokeStyle = "#444";
       ctx.lineWidth = 0.5;
-      const step = p.step;
-      for (let py = p.svgOffsetY % (step * p.zoom); py < ch; py += step * p.zoom) {
-        const val = Math.round((py - p.svgOffsetY) / p.zoom);
+      for (let py = svgTop % (step * p.zoom); py < ch; py += step * p.zoom) {
+        const val = Math.round((py - svgTop) / p.zoom);
         if (val >= 0 && val <= p.h) {
           ctx.beginPath();
           ctx.moveTo(cw - 6, py);
@@ -785,11 +782,11 @@
       {#if settings.showRulers}
         <!-- Top ruler -->
         <div class="ruler ruler-h">
-          <canvas class="ruler-canvas" use:rulerHAction={{ zoom, panX, wrapW, w, svgOffsetX, step: rulerTickStep }}></canvas>
+          <canvas class="ruler-canvas" use:rulerHAction={{ zoom, panX, w }}></canvas>
         </div>
         <!-- Left ruler -->
         <div class="ruler ruler-v">
-          <canvas class="ruler-canvas" use:rulerVAction={{ zoom, panY, wrapH, h, svgOffsetY, step: rulerTickStep }}></canvas>
+          <canvas class="ruler-canvas" use:rulerVAction={{ zoom, panY, h }}></canvas>
         </div>
         <div class="ruler-corner"></div>
       {/if}
@@ -803,7 +800,7 @@
       >
         <!-- Grid overlay -->
         {#if settings.showGrid}
-          <svg class="grid-overlay" viewBox="0 0 {w} {h}" style="width:{w*zoom}px;height:{h*zoom}px;transform:translate({svgOffsetX}px,{svgOffsetY}px)">
+          <svg class="grid-overlay" viewBox="0 0 {w} {h}" style="width:{w*zoom}px;height:{h*zoom}px;transform:translate({panX}px,{panY}px)">
             <defs>
               <pattern id="gridSmall" width={rulerTickStep} height={rulerTickStep} patternUnits="userSpaceOnUse">
                 <path d="M {rulerTickStep} 0 L 0 0 0 {rulerTickStep}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"/>
@@ -824,7 +821,7 @@
           width={w * zoom}
           height={h * zoom}
           class="draw-svg"
-          style="touch-action:none; transform: translate({svgOffsetX}px, {svgOffsetY}px) rotate({canvasRotation}deg)"
+          style="touch-action:none; transform: translate({panX}px, {panY}px)"
           onpointerdown={pointerDown}
           onpointermove={pointerMove}
           onpointerup={pointerUp}
@@ -859,18 +856,22 @@
         </svg>
 
         <!-- Brush cursor preview -->
-        {#if hovering && !panning}
-          <div
-            class="brush-cursor"
-            style="
-              left:{cursorScreenX - canvasWrap.getBoundingClientRect().left}px;
-              top:{cursorScreenY - canvasWrap.getBoundingClientRect().top}px;
-              width:{lineWidth * zoom}px;
-              height:{lineWidth * zoom}px;
-              border-color:{tool === 'eraser' ? '#ff4444' : 'rgba(255,255,255,0.6)'};
-              opacity:{drawing ? 0.3 : 0.7};
-            "
-          ></div>
+        {#if hovering && !panning && svgEl}
+          {@const svgRect = svgEl.getBoundingClientRect()}
+          {@const wrapRect = canvasWrap?.getBoundingClientRect()}
+          {#if wrapRect}
+            <div
+              class="brush-cursor"
+              style="
+                left:{cursorScreenX - wrapRect.left}px;
+                top:{cursorScreenY - wrapRect.top}px;
+                width:{lineWidth * zoom}px;
+                height:{lineWidth * zoom}px;
+                border-color:{tool === 'eraser' ? '#ff4444' : 'rgba(255,255,255,0.6)'};
+                opacity:{drawing ? 0.3 : 0.7};
+              "
+            ></div>
+          {/if}
         {/if}
       </div>
     </div>
@@ -1026,10 +1027,10 @@
   .ruler-corner { position: absolute; left: 0; top: 0; width: 20px; height: 20px; background: #26262a; border-right: 1px solid #333; border-bottom: 1px solid #333; z-index: 3; }
   .ruler-canvas { width: 100%; height: 100%; display: block; }
 
-  .canvas-wrap { flex: 1; overflow: hidden; position: relative; background: #1a1a1e; min-height: 0; }
+  .canvas-wrap { flex: 1; overflow: hidden; position: relative; background: #1a1a1e; min-height: 0; display: flex; align-items: center; justify-content: center; }
   .canvas-wrap.panning { cursor: grab !important; }
-  .draw-svg { display: block; position: absolute; left: 0; top: 0; box-shadow: 0 0 0 1px rgba(255,255,255,.04), 0 2px 16px rgba(0,0,0,.5); cursor: crosshair; }
-  .grid-overlay { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 1; }
+  .draw-svg { display: block; box-shadow: 0 0 0 1px rgba(255,255,255,.04), 0 2px 16px rgba(0,0,0,.5); cursor: crosshair; flex-shrink: 0; }
+  .grid-overlay { position: absolute; pointer-events: none; z-index: 1; }
 
   .brush-cursor { position: absolute; pointer-events: none; border: 1.5px solid; border-radius: 50%; transform: translate(-50%, -50%); z-index: 10; transition: width .05s, height .05s, opacity .15s; }
 
