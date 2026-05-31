@@ -42,9 +42,9 @@ function extractFileFromMultipart(body: Uint8Array, contentTypeHeader: string | 
   return null;
 }
 
-export const POST: RequestHandler = async ({ request }) => {
+export const POST: RequestHandler = async ({ request, url }) => {
   try {
-    const apiKey = (request.headers.get('x-api-key') ?? '').trim();
+    const apiKey = (request.headers.get('x-api-key') ?? url.searchParams.get('api_key') ?? '').trim();
     const fileRequestHeader = decodeURIComponent((request.headers.get('x-file-request') ?? '').trim());
     const folderId = (request.headers.get('x-folder-id') ?? '').trim();
 

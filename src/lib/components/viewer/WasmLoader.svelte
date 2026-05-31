@@ -120,14 +120,14 @@
   .wl-card {
     display: flex; flex-direction: column; align-items: center; gap: 12px;
     padding: 32px 36px; border-radius: 18px; text-align: center;
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
     max-width: 340px; width: 100%;
   }
   .wl-icon { font-size: 32px; line-height: 1; }
-  .wl-title { color: rgba(255,255,255,.85); font-size: 15px; font-weight: 600; margin: 0; }
-  .wl-sub { color: rgba(255,255,255,.4); font-size: 12.5px; line-height: 1.5; margin: 0; }
-  .wl-sub strong { color: rgba(255,255,255,.65); }
+  .wl-title { color: var(--text-1); font-size: 15px; font-weight: 600; margin: 0; }
+  .wl-sub { color: var(--text-3); font-size: 12.5px; line-height: 1.5; margin: 0; }
+  .wl-sub strong { color: var(--text-2); }
   .wl-err { color: #f87171 !important; }
   .wl-row { display: flex; gap: 8px; }
   .wl-btn {
@@ -138,16 +138,16 @@
   }
   .wl-btn:hover { opacity: .85; }
   .wl-secondary {
-    background: rgba(255,255,255,.08); color: rgba(255,255,255,.6);
+    background: var(--bg-3); color: var(--text-2);
   }
   .wl-bar-wrap {
     width: 100%; height: 4px; border-radius: 99px;
-    background: rgba(255,255,255,.08); overflow: hidden;
+    background: var(--bg-3); overflow: hidden;
   }
   .wl-bar {
     height: 100%; border-radius: 99px;
     background: var(--accent, #6366f1);
     transition: width .2s ease;
   }
-  .wl-pct { color: rgba(255,255,255,.3); font-size: 11px; font-family: 'Geist Mono', monospace; }
+  .wl-pct { color: var(--text-3); font-size: 11px; font-family: 'Geist Mono', monospace; }
 </style>

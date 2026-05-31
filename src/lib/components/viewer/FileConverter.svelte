@@ -8,7 +8,7 @@
     fileName: string; type: string; totalBytes: number; metaFileId: string;
   };
 
-  let { file, url }: { file: FileRecord; url: string | null } = $props();
+  let { file, url, apiKey = '' }: { file: FileRecord; url: string | null; apiKey?: string } = $props();
 
   // Determine which engine to use
   function engineFor(f: FileRecord): 'ffmpeg' | 'imagemagick' | 'native' | null {
@@ -156,6 +156,30 @@
     const a = document.createElement('a');
     a.href = resultUrl; a.download = resultName; a.click();
   }
+
+  let saving = $state(false);
+  let saveOk = $state(false);
+
+  async function saveToCloud() {
+    if (!resultUrl || saving || !apiKey) return;
+    saving = true;
+    try {
+      const res = await fetch(resultUrl);
+      const blob = await res.blob();
+      const fd = new FormData();
+      fd.append("file", blob, resultName);
+      const up = await fetch("/api/telegram/uploadFile", {
+        method: "POST", body: fd,
+        headers: { "X-Api-Key": apiKey },
+      });
+      if (!up.ok) throw new Error(`Upload failed: ${up.status}`);
+      saveOk = true;
+      setTimeout(() => saveOk = false, 3000);
+    } catch (e: any) {
+      error = e?.message ?? "Save failed";
+    }
+    saving = false;
+  }
 </script>
 
 <div class="fc-wrap">
@@ -208,7 +232,20 @@
       {#if resultUrl}
         <div class="fc-result">
           <span class="fc-result-name">✓ {resultName}</span>
-          <button class="fc-btn fc-dl" onclick={download}>Download</button>
+          <div class="fc-actions">
+            <button class="fc-btn fc-dl" onclick={download}>Download</button>
+            {#if apiKey}
+              <button class="fc-btn fc-save" onclick={saveToCloud} disabled={saving}>
+                {#if saving}
+                  Saving…
+                {:else if saveOk}
+                  ✓ Saved
+                {:else}
+                  Save to Cloud
+                {/if}
+              </button>
+            {/if}
+          </div>
         </div>
       {/if}
     </div>
@@ -224,14 +261,14 @@
     display: flex; flex-direction: column; gap: 16px;
     width: min(420px, 100%);
   }
-  .fc-label { color: rgba(255,255,255,.45); font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; margin: 0; }
+  .fc-label { color: var(--text-3); font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; margin: 0; }
   .fc-formats { display: flex; flex-wrap: wrap; gap: 6px; }
   .fc-fmt {
-    padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,.1);
-    background: transparent; color: rgba(255,255,255,.5); font-size: 12px; font-weight: 600;
+    padding: 5px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-3); font-size: 12px; font-weight: 600;
     font-family: 'Geist Mono', monospace; cursor: pointer; transition: .13s;
   }
-  .fc-fmt:hover { border-color: rgba(255,255,255,.25); color: rgba(255,255,255,.8); }
+  .fc-fmt:hover { border-color: var(--border-hover); color: var(--text-1); }
   .fc-fmt-active { background: var(--accent, #6366f1); border-color: transparent; color: #fff; }
   .fc-btn {
     padding: 10px 24px; border-radius: 999px; border: none;
@@ -242,10 +279,12 @@
   .fc-btn:disabled { opacity: .4; cursor: not-allowed; }
   .fc-btn:not(:disabled):hover { opacity: .85; }
   .fc-dl { background: #22c55e; margin-top: 4px; }
-  .fc-bar-wrap { height: 4px; border-radius: 99px; background: rgba(255,255,255,.08); overflow: hidden; }
+  .fc-bar-wrap { height: 4px; border-radius: 99px; background: var(--bg-3); overflow: hidden; }
   .fc-bar { height: 100%; border-radius: 99px; background: var(--accent, #6366f1); transition: width .2s; }
   .fc-error { color: #f87171; font-size: 12.5px; margin: 0; }
   .fc-result { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .fc-actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .fc-result-name { color: #4ade80; font-size: 13px; font-family: 'Geist Mono', monospace; }
-  .fc-unsupported { color: rgba(255,255,255,.3); font-size: 13px; }
+  .fc-save { background: var(--accent, #6366f1); margin-top: 4px; }
+  .fc-unsupported { color: var(--text-3); font-size: 13px; }
 </style>

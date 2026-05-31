@@ -15,6 +15,7 @@ export const load: LayoutServerLoad = async ({ cookies }) => {
   if (!rec) throw redirect(302, '/');
 
   return {
+    apiKey,
     user: { username: rec.username }
   };
 };

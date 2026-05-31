@@ -6,6 +6,7 @@ import {
   saveVaultState,
   loadVaultIndex,
   exportVaultKey,
+  getPinnedFileId,
   VaultIndexPlain,
   VaultRegistryPlain
 } from '../_vault';
@@ -48,7 +49,7 @@ export const POST: RequestHandler = async ({ request, cookies, locals }) => {
       updatedAt: Date.now()
     };
 
-    await saveVaultState(key, index, registry);
+    const result = await saveVaultState(key, index, registry);
 
     cookies.set('vault_session', passwordHash, {
       path: '/',
@@ -65,6 +66,16 @@ export const POST: RequestHandler = async ({ request, cookies, locals }) => {
       sameSite: 'strict',
       maxAge: 3600
     });
+
+    if (result?.indexFileId) {
+      cookies.set('vault_index_file_id', result.indexFileId, {
+        path: '/',
+        httpOnly: true,
+        secure: cookieSecure(request),
+        sameSite: 'strict',
+        maxAge: 3600
+      });
+    }
 
     return new Response(JSON.stringify({ ok: true, created: true }), {
       headers: { 'Content-Type': 'application/json' }
@@ -104,6 +115,17 @@ export const POST: RequestHandler = async ({ request, cookies, locals }) => {
     sameSite: 'strict',
     maxAge: 3600
   });
+
+  const pinnedFileId = await getPinnedFileId();
+  if (pinnedFileId) {
+    cookies.set('vault_index_file_id', pinnedFileId, {
+      path: '/',
+      httpOnly: true,
+      secure: cookieSecure(request),
+      sameSite: 'strict',
+      maxAge: 3600
+    });
+  }
 
   return new Response(JSON.stringify({ ok: true, created: false }), {
     headers: { 'Content-Type': 'application/json' }

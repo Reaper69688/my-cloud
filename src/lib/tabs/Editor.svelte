@@ -94,8 +94,9 @@
       const name    = saveName.endsWith(".png") ? saveName : saveName + ".png";
       const fd      = new FormData();
       fd.append("file", blob, name);
-      const up = await fetch(`/api/telegram/uploadFile?api_key=${encodeURIComponent(apiKey)}`, {
+      const up = await fetch("/api/telegram/uploadFile", {
         method: "POST", body: fd,
+        headers: { "X-Api-Key": apiKey },
       });
       if (!up.ok) throw new Error(`Upload failed: ${up.status}`);
       saveOk = true;

@@ -3,9 +3,9 @@ import type { RequestHandler } from './$types';
 import { getRecordByApiKey, uploadJsonToTelegram, registerFile } from '$lib/telegramStorage';
 import { TG_SAFE_CHUNK_BYTES } from '$lib/telegramLimits';
 
-export const POST: RequestHandler = async ({ request }) => {
+export const POST: RequestHandler = async ({ request, url }) => {
   try {
-    const apiKey = (request.headers.get('x-api-key') ?? '').trim();
+    const apiKey = (request.headers.get('x-api-key') ?? url.searchParams.get('api_key') ?? '').trim();
     if (!apiKey)
       return new Response(JSON.stringify({ error: 'Missing X-Api-Key' }), { status: 403 });
 

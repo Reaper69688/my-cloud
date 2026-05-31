@@ -3,6 +3,8 @@
   import FileConverter from '$lib/components/viewer/FileConverter.svelte';
   import { IconUpload, IconX } from '@tabler/icons-svelte';
 
+  let { apiKey = '' }: { apiKey?: string } = $props();
+
   let pickedFile = $state<File | null>(null);
   let pickedUrl  = $state<string | null>(null);
   let dragging   = $state(false);
@@ -63,7 +65,7 @@
         <button class="clear-btn" onclick={clearFile}><IconX size={14}/></button>
       </div>
       <div class="converter-body">
-        <FileConverter file={fakeRecord!} url={pickedUrl}/>
+        <FileConverter file={fakeRecord!} url={pickedUrl} {apiKey}/>
       </div>
     </div>
   {/if}

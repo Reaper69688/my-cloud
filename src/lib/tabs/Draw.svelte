@@ -251,8 +251,9 @@
       );
       const fd = new FormData();
       fd.append("file", blob, saveName);
-      const res = await fetch(`/api/telegram/uploadFile?api_key=${encodeURIComponent(apiKey)}`, {
+      const res = await fetch("/api/telegram/uploadFile", {
         method: "POST", body: fd,
+        headers: { "X-Api-Key": apiKey },
       });
       if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
       saveOk = true;

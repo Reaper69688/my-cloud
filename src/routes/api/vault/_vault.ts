@@ -183,12 +183,18 @@ async function deleteManyMessages(ids: Array<number | null | undefined>) {
   }
 }
 
-export async function loadVaultIndex(): Promise<VaultIndexPlain | null> {
-  const pinned = await telegramGetPinnedMessage();
-  if (!pinned?.document?.file_id) return null;
+export async function loadVaultIndex(fileId?: string | null): Promise<VaultIndexPlain | null> {
+  let targetFileId = fileId;
+
+  if (!targetFileId) {
+    const pinned = await telegramGetPinnedMessage();
+    targetFileId = pinned?.document?.file_id ?? null;
+  }
+
+  if (!targetFileId) return null;
 
   try {
-    const downloaded = await downloadFileFromTelegram(pinned.document.file_id);
+    const downloaded = await downloadFileFromTelegram(targetFileId);
     const text = downloaded.data.toString('utf8');
     const parsed = JSON.parse(text) as Partial<VaultIndexPlain>;
 
@@ -229,11 +235,9 @@ export async function saveVaultState(
   registry: VaultRegistryPlain,
   cleanup?: {
     previousRegistryMessageId?: number | null;
+    previousIndexMessageId?: number | null;
   }
 ) {
-  const previousPinned = await telegramGetPinnedMessage().catch(() => null);
-  const previousIndexMessageId = previousPinned?.message_id ?? null;
-
   let registryUpload: { message_id: number; file_id: string } | null = null;
   let indexUpload: { message_id: number; file_id: string } | null = null;
 
@@ -261,18 +265,8 @@ export async function saveVaultState(
       throw new Error('Index upload failed');
     }
 
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/pinChatMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        message_id: indexUpload.message_id,
-        disable_notification: true
-      })
-    });
-
     await deleteManyMessages([
-      previousIndexMessageId,
+      cleanup?.previousIndexMessageId,
       cleanup?.previousRegistryMessageId
     ].filter((id): id is number => typeof id === 'number' && id > 0 && id !== indexUpload?.message_id));
 
@@ -341,13 +335,19 @@ export async function decryptVaultFile(
   );
 }
 
+export async function getPinnedFileId(): Promise<string | null> {
+  const pinned = await telegramGetPinnedMessage();
+  return pinned?.document?.file_id ?? null;
+}
+
 export async function getVaultContext(userId: string | undefined, cookies: CookieLike) {
   const sessionHash = (cookies.get('vault_session') ?? '').trim();
   const rawKey = (cookies.get('vault_key') ?? '').trim();
+  const indexFileId = (cookies.get('vault_index_file_id') ?? '').trim() || null;
 
   if (!userId || !sessionHash || !rawKey) return null;
 
-  const index = await loadVaultIndex();
+  const index = await loadVaultIndex(indexFileId);
   if (!index || index.userId !== userId || index.hash !== sessionHash) return null;
 
   const key = await importVaultKey(rawKey).catch(() => null);
