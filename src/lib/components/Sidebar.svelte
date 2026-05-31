@@ -7,12 +7,11 @@
     IconFolder, IconFile, IconCloud, IconChevronUp, IconChevronDown,
     IconPencil,
     IconChartBar,
-    IconArrowsShuffle,
   } from '@tabler/icons-svelte';
   import { env } from '$env/dynamic/public';
   const NAME = env.PUBLIC_NAME ?? "Omar";
 
-  type Tab = 'files' | 'generators' | 'downloader' | 'draw' | 'stats' | 'editor' | 'vault' | 'converter';
+  type Tab = 'files' | 'generators' | 'downloader' | 'draw' | 'stats' | 'editor' | 'vault';
 
   let {
     user,
@@ -67,7 +66,6 @@
     { id: 'files',      icon: IconFiles,          label: 'Files'      },
     { id: 'generators', icon: IconSparkles,        label: 'Generators' },
     { id: 'draw',       icon: IconPencil,           label: 'Draw'       },
-    { id: 'converter',  icon: IconArrowsShuffle,   label: 'Convert'    },
     { id: 'stats',      icon: IconChartBar,          label: 'Stats'      },
     { id: 'vault',      icon: IconLock,                label: 'Vault' }
   ];

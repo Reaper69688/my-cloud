@@ -1,261 +1,280 @@
-<!-- src/lib/tabs/Draw.svelte -->
 <script lang="ts">
   import { onMount } from "svelte";
   import {
     IconPencil, IconEraser, IconSquare, IconCircle,
-    IconLine, IconArrowBack, IconArrowForward,
-    IconTrash, IconDownload, IconUpload, IconBrush,
-    IconSlash, IconTriangle, IconPentagon,
+    IconMinus, IconArrowBack, IconArrowForward,
+    IconArrowBadgeRight, IconTrash, IconDownload, IconUpload, IconBrush,
+    IconSlash, IconTriangle,
   } from "@tabler/icons-svelte";
 
   let { apiKey }: { apiKey: string } = $props();
 
-  // ── Canvas ────────────────────────────────────────────────────────────────
-  let canvasEl = $state<HTMLCanvasElement | null>(null);
-  let ctx: CanvasRenderingContext2D | null = null;
-  let isDrawing = false;
-  let lastX = 0, lastY = 0;
-  let startX = 0, startY = 0;
-  let snapshotBeforeShape: ImageData | null = null;
+  // ── SVG ────────────────────────────────────────────────────────────────
+  let svgEl: SVGSVGElement;
+  let w = $state(800);
+  let h = $state(600);
 
-  // ── Tool state ────────────────────────────────────────────────────────────
-  type Tool = "pen" | "brush" | "eraser" | "line" | "rect" | "ellipse" | "arrow" | "triangle";
+  // ── Tool state ─────────────────────────────────────────────────────────
+  type Tool = "pen" | "pencil" | "brush" | "eraser" | "line" | "rect" | "ellipse" | "arrow" | "triangle";
   let tool       = $state<Tool>("pen");
   let color      = $state("#ffffff");
   let bgColor    = $state("#1a1a1a");
   let lineWidth  = $state(3);
   let opacity    = $state(100);
-  let hardness   = $state(100); // 100 = hard, 0 = soft (blur)
+  let hardness   = $state(100); // 100 = hard, 0 = soft (blur) — pencil texture
   let fill       = $state(false);
 
-  // ── Undo/Redo ─────────────────────────────────────────────────────────────
-  let history: ImageData[] = [];
-  let historyIdx = -1;
-  const MAX_HISTORY = 40;
+  // ── Strokes ─────────────────────────────────────────────────────────────
+  type Point = { x: number; y: number };
 
-  function saveSnapshot() {
-    if (!ctx || !canvasEl) return;
-    const snap = ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
-    history = history.slice(0, historyIdx + 1);
-    history.push(snap);
-    if (history.length > MAX_HISTORY) history.shift();
-    historyIdx = history.length - 1;
+  type Stroke = {
+    id: string;
+    tool: Tool;
+    color: string;
+    width: number;
+    opacity: number;
+    fill: boolean;
+    d?: string;           // SVG path data for freehand strokes
+    points: Point[];
+    pencilPaths?: string[]; // cached pencil offset paths
+    // Shape params
+    shapeType?: string;
+    sx?: number; sy?: number; ex?: number; ey?: number;
+  };
+
+  let strokes: Stroke[] = [];
+  let historyIdx = -1;
+  const MAX_HISTORY = 50;
+
+  let drawing = false;
+  let currentStroke: Stroke | null = null;
+  let currentPoints: Point[] = [];
+  let pencilPaths: string[] = [];
+
+  // ── SVG coords ──────────────────────────────────────────────────────────
+  function svgPoint(e: PointerEvent): Point {
+    const rect = canvasArea.getBoundingClientRect();
+    const scaleX = w / rect.width;
+    const scaleY = h / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY,
+    };
   }
 
+  // ── Smooth curve ────────────────────────────────────────────────────────
+  function smoothPath(pts: Point[]): string {
+    if (pts.length === 0) return '';
+    if (pts.length === 1) return `M${pts[0].x},${pts[0].y}`;
+    let d = `M${pts[0].x},${pts[0].y}`;
+    for (let i = 1; i < pts.length; i++) {
+      const p0 = pts[i - 1];
+      const p1 = pts[i];
+      const cpx = (p0.x + p1.x) / 2;
+      const cpy = (p0.y + p1.y) / 2;
+      d += ` Q${p0.x},${p0.y} ${cpx},${cpy}`;
+    }
+    return d;
+  }
+
+  // ── Pencil: generate multiple offset paths ──────────────────────────────
+  function generatePencilPaths(pts: Point[], w: number): string[] {
+    const count = Math.max(2, Math.round(hardness / 20));
+    const scatter = Math.max(0.2, (100 - hardness) / 30);
+    const paths: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const offset = (i - (count - 1) / 2) * scatter;
+      const offsetPts = pts.map(p => ({ x: p.x + (Math.random() - 0.5) * scatter, y: p.y + (Math.random() - 0.5) * scatter }));
+      paths.push(smoothPath(offsetPts));
+    }
+    return paths;
+  }
+
+  // ── Brush width from velocity ──────────────────────────────────────────
+  let lastTime = 0;
+  let lastPt: Point | null = null;
+
+  function brushWidth(pt: Point): number {
+    const now = performance.now();
+    let vel = 0;
+    if (lastPt && lastTime) {
+      const dx = pt.x - lastPt.x;
+      const dy = pt.y - lastPt.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const dt = Math.max(1, now - lastTime);
+      vel = dist / dt;
+    }
+    lastPt = pt;
+    lastTime = now;
+    // Slow = wide, fast = thin
+    const minW = lineWidth * 0.3;
+    const maxW = lineWidth * 2;
+    const factor = Math.min(1, vel / 3);
+    return maxW - (maxW - minW) * factor;
+  }
+
+  // ── Pointer handlers ────────────────────────────────────────────────────
+  function pointerDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    drawing = true;
+    const pt = svgPoint(e);
+    currentPoints = [pt];
+    lastPt = pt;
+    lastTime = performance.now();
+
+    const isShape = ['line','rect','ellipse','arrow','triangle'].includes(tool);
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+
+    if (isShape) {
+      currentStroke = {
+        id, tool, color, width: lineWidth, opacity: opacity / 100, fill,
+        shapeType: tool,
+        points: [pt],
+        sx: pt.x, sy: pt.y, ex: pt.x, ey: pt.y,
+      };
+    } else {
+      currentStroke = {
+        id, tool, color: tool === 'eraser' ? bgColor : color,
+        width: tool === 'brush' ? lineWidth : lineWidth,
+        opacity: opacity / 100,
+        fill: false,
+        points: [pt],
+        d: `M${pt.x},${pt.y}`,
+      };
+    }
+
+    svgEl.setPointerCapture(e.pointerId);
+  }
+
+  function pointerMove(e: PointerEvent) {
+    if (!drawing || !currentStroke) return;
+    const pt = svgPoint(e);
+    currentPoints.push(pt);
+
+    if (['line','rect','ellipse','arrow','triangle'].includes(tool)) {
+      currentStroke.ex = pt.x;
+      currentStroke.ey = pt.y;
+    } else if (tool === 'pencil') {
+      currentStroke.points = [...currentPoints];
+      const paths = generatePencilPaths(currentPoints, lineWidth);
+      pencilPaths = paths;
+      currentStroke.d = paths[0];
+    } else if (tool === 'brush') {
+      const bw = brushWidth(pt);
+      currentStroke.width = bw;
+      currentStroke.points = [...currentPoints];
+      currentStroke.d = smoothPath(currentPoints);
+    } else {
+      currentStroke.points = [...currentPoints];
+      currentStroke.d = smoothPath(currentPoints);
+    }
+  }
+
+  function pointerUp(_e: PointerEvent) {
+    if (!drawing || !currentStroke) return;
+    drawing = false;
+
+    if (currentPoints.length < 2) return;
+
+    // Truncate history past current index
+    strokes = strokes.slice(0, historyIdx + 1);
+    if (currentStroke.tool === 'pencil') {
+      currentStroke.pencilPaths = generatePencilPaths(currentPoints, lineWidth);
+    }
+    strokes.push(currentStroke);
+    historyIdx = strokes.length - 1;
+    if (strokes.length > MAX_HISTORY) {
+      strokes = strokes.slice(-MAX_HISTORY);
+      historyIdx = strokes.length - 1;
+    }
+
+    currentStroke = null;
+    currentPoints = [];
+    pencilPaths = [];
+    lastPt = null;
+  }
+
+  // ── Undo / Redo ─────────────────────────────────────────────────────────
   function undo() {
-    if (!ctx || !canvasEl || historyIdx <= 0) return;
+    if (historyIdx < 0) return;
     historyIdx--;
-    ctx.putImageData(history[historyIdx], 0, 0);
   }
 
   function redo() {
-    if (!ctx || !canvasEl || historyIdx >= history.length - 1) return;
+    if (historyIdx >= strokes.length - 1) return;
     historyIdx++;
-    ctx.putImageData(history[historyIdx], 0, 0);
   }
 
-  // ── Canvas setup ──────────────────────────────────────────────────────────
-  function resizeCanvas() {
-    if (!canvasEl || !ctx) return;
-    const snap = ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
-    const wrapper = canvasEl.parentElement!;
-    canvasEl.width  = wrapper.clientWidth;
-    canvasEl.height = wrapper.clientHeight;
-    fillBackground();
-    ctx.putImageData(snap, 0, 0);
+  function clearAll() {
+    strokes = [];
+    historyIdx = -1;
+    currentStroke = null;
+    currentPoints = [];
   }
 
-  function fillBackground() {
-    if (!ctx || !canvasEl) return;
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, canvasEl.width, canvasEl.height);
-  }
+  // ── Shape rendering ─────────────────────────────────────────────────────
+  function shapeAttrs(s: Stroke) {
+    if (!s.sx || !s.sy || s.ex === undefined || s.ey === undefined) return {};
+    const x = Math.min(s.sx, s.ex);
+    const y = Math.min(s.sy, s.ey);
+    const sw = Math.abs(s.ex - s.sx);
+    const sh = Math.abs(s.ey - s.sy);
 
-  onMount(() => {
-    if (!canvasEl) return;
-    ctx = canvasEl.getContext("2d")!;
-    const wrapper = canvasEl.parentElement!;
-    canvasEl.width  = wrapper.clientWidth;
-    canvasEl.height = wrapper.clientHeight;
-    fillBackground();
-    saveSnapshot();
-
-    const ro = new ResizeObserver(() => resizeCanvas());
-    ro.observe(wrapper);
-    return () => ro.disconnect();
-  });
-
-  // ── Drawing helpers ───────────────────────────────────────────────────────
-  function applyCtxStyle(forEraser = false) {
-    if (!ctx) return;
-    ctx.globalAlpha     = opacity / 100;
-    ctx.lineWidth       = lineWidth;
-    ctx.lineCap         = "round";
-    ctx.lineJoin        = "round";
-    if (forEraser) {
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.strokeStyle = "rgba(0,0,0,1)";
-    } else {
-      ctx.globalCompositeOperation = "source-over";
-      ctx.strokeStyle = color;
-      ctx.fillStyle   = color;
-      if (tool === "brush" && hardness < 100) {
-        ctx.shadowBlur  = (100 - hardness) * 0.4 * lineWidth;
-        ctx.shadowColor = color;
-      } else {
-        ctx.shadowBlur = 0;
+    switch (s.shapeType) {
+      case 'line':
+        return { x1: s.sx, y1: s.sy, x2: s.ex, y2: s.ey };
+      case 'rect':
+        return { x, y, width: sw, height: sh, rx: 0 };
+      case 'ellipse':
+        return { cx: (s.sx + s.ex) / 2, cy: (s.sy + s.ey) / 2, rx: sw / 2, ry: sh / 2 };
+      case 'arrow': {
+        const angle = Math.atan2(s.ey - s.sy, s.ex - s.sx);
+        const headLen = Math.min(20, Math.sqrt(sw*sw + sh*sh) * 0.3);
+        const a = Math.PI / 6;
+        const x1 = s.ex - headLen * Math.cos(angle - a);
+        const y1 = s.ey - headLen * Math.sin(angle - a);
+        const x2 = s.ex - headLen * Math.cos(angle + a);
+        const y2 = s.ey - headLen * Math.sin(angle + a);
+        return { x1: s.sx, y1: s.sy, x2: s.ex, y2: s.ey, headX1: x1, headY1: y1, headX2: x2, headY2: y2 };
       }
+      case 'triangle':
+        return { points: `${(s.sx + s.ex) / 2},${y} ${x},${s.ey} ${s.ex},${s.ey}` };
+      default:
+        return {};
     }
   }
 
-  function getPos(e: MouseEvent | TouchEvent): [number, number] {
-    const rect = canvasEl!.getBoundingClientRect();
-    if (e instanceof TouchEvent) {
-      const t = e.touches[0] ?? e.changedTouches[0];
-      return [t.clientX - rect.left, t.clientY - rect.top];
-    }
-    return [(e as MouseEvent).clientX - rect.left, (e as MouseEvent).clientY - rect.top];
-  }
-
-  function startDraw(e: MouseEvent | TouchEvent) {
-    if (!ctx || !canvasEl) return;
-    e.preventDefault();
-    isDrawing = true;
-    [lastX, lastY] = getPos(e);
-    [startX, startY] = [lastX, lastY];
-
-    if (["line","rect","ellipse","arrow","triangle"].includes(tool)) {
-      snapshotBeforeShape = ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
-    }
-
-    if (tool === "pen" || tool === "brush") {
-      applyCtxStyle(false);
-      ctx.beginPath();
-      ctx.moveTo(lastX, lastY);
-    }
-    if (tool === "eraser") {
-      applyCtxStyle(true);
-      ctx.beginPath();
-      ctx.moveTo(lastX, lastY);
-    }
-  }
-
-  function draw(e: MouseEvent | TouchEvent) {
-    if (!isDrawing || !ctx || !canvasEl) return;
-    e.preventDefault();
-    const [x, y] = getPos(e);
-
-    if (tool === "pen" || tool === "brush") {
-      applyCtxStyle(false);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-      lastX = x; lastY = y;
-      return;
-    }
-
-    if (tool === "eraser") {
-      applyCtxStyle(true);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-      lastX = x; lastY = y;
-      return;
-    }
-
-    // Shape preview — restore snapshot then redraw shape
-    if (snapshotBeforeShape) ctx.putImageData(snapshotBeforeShape, 0, 0);
-    applyCtxStyle(false);
-    ctx.beginPath();
-
-    if (tool === "rect") {
-      if (fill) ctx.fillRect(startX, startY, x - startX, y - startY);
-      ctx.strokeRect(startX, startY, x - startX, y - startY);
-
-    } else if (tool === "ellipse") {
-      const rx = Math.abs(x - startX) / 2;
-      const ry = Math.abs(y - startY) / 2;
-      const cx = startX + (x - startX) / 2;
-      const cy = startY + (y - startY) / 2;
-      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-      if (fill) ctx.fill();
-      ctx.stroke();
-
-    } else if (tool === "line") {
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-
-    } else if (tool === "arrow") {
-      const angle = Math.atan2(y - startY, x - startX);
-      const len   = Math.hypot(x - startX, y - startY);
-      const headLen = Math.min(20 + lineWidth * 2, len * 0.4);
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x - headLen * Math.cos(angle - Math.PI / 6), y - headLen * Math.sin(angle - Math.PI / 6));
-      ctx.lineTo(x - headLen * Math.cos(angle + Math.PI / 6), y - headLen * Math.sin(angle + Math.PI / 6));
-      ctx.closePath();
-      ctx.fill();
-
-    } else if (tool === "triangle") {
-      ctx.moveTo(startX + (x - startX) / 2, startY);
-      ctx.lineTo(x, y);
-      ctx.lineTo(startX, y);
-      ctx.closePath();
-      if (fill) ctx.fill();
-      ctx.stroke();
-    }
-  }
-
-  function endDraw(e: MouseEvent | TouchEvent) {
-    if (!isDrawing) return;
-    e.preventDefault();
-    draw(e);
-    isDrawing = false;
-    ctx!.shadowBlur = 0;
-    ctx!.globalCompositeOperation = "source-over";
-    ctx!.globalAlpha = 1;
-    snapshotBeforeShape = null;
-    saveSnapshot();
-  }
-
-  // ── Keyboard shortcuts ────────────────────────────────────────────────────
-  function onKey(e: KeyboardEvent) {
-    if (e.target instanceof HTMLInputElement) return;
-    if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
-    if ((e.ctrlKey || e.metaKey) && e.key === "y") { e.preventDefault(); redo(); }
-    const map: Record<string, Tool> = { p:"pen", b:"brush", e:"eraser", l:"line", r:"rect", o:"ellipse", a:"arrow", t:"triangle" };
-    if (!e.ctrlKey && !e.metaKey && map[e.key]) tool = map[e.key];
-  }
-
-  // ── Clear ─────────────────────────────────────────────────────────────────
-  function clearCanvas() {
-    if (!ctx || !canvasEl) return;
-    fillBackground();
-    saveSnapshot();
-  }
-
-  // ── Save as PNG to Telegram ───────────────────────────────────────────────
+  // ── Save to cloud ───────────────────────────────────────────────────────
   let saving    = $state(false);
   let saveError = $state<string | null>(null);
   let saveName  = $state("drawing.png");
   let saveOk    = $state(false);
 
   async function saveToCloud() {
-    if (!canvasEl || saving) return;
+    if (!svgEl || saving) return;
     saving = true; saveError = null; saveOk = false;
     try {
-      const blob = await new Promise<Blob>((res, rej) =>
-        canvasEl!.toBlob(b => b ? res(b) : rej(new Error("toBlob failed")), "image/png")
-      );
+      // Render SVG to canvas, then upload
+      const svgData = renderSvgString();
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d')!;
+      const img = new Image();
+      const blob = await new Promise<Blob>((res, rej) => {
+        img.onload = async () => {
+          ctx.drawImage(img, 0, 0);
+          canvas.toBlob(b => b ? res(b) : rej(new Error("toBlob failed")), "image/png");
+        };
+        img.onerror = rej;
+        img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+      });
       const fd = new FormData();
       fd.append("file", blob, saveName);
-      const res = await fetch("/api/telegram/uploadFile", {
+      const up = await fetch("/api/telegram/uploadFile", {
         method: "POST", body: fd,
         headers: { "X-Api-Key": apiKey },
       });
-      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      if (!up.ok) throw new Error(`Upload failed: ${up.status}`);
       saveOk = true;
       setTimeout(() => saveOk = false, 3000);
     } catch (err: any) {
@@ -265,524 +284,397 @@
     }
   }
 
-  // ── Download locally ──────────────────────────────────────────────────────
+  // ── Render SVG string ───────────────────────────────────────────────────
+  function renderSvgString(withBg = false): string {
+    const visible = strokes.slice(0, historyIdx + 1);
+    const cur = currentStroke;
+    let inner = '';
+
+    for (const s of visible) {
+      if (s.shapeType) {
+        const attrs = shapeAttrs(s);
+        const sw = s.width;
+        const op = s.opacity;
+        if (s.shapeType === 'line') {
+          inner += `<line ${attr(attrs,'x1','y1','x2','y2')} stroke="${s.color}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`;
+        } else if (s.shapeType === 'rect') {
+          inner += `<rect ${attr(attrs,'x','y','width','height','rx')} fill="${s.fill ? s.color : 'none'}" stroke="${s.fill ? 'none' : s.color}" stroke-width="${sw}" opacity="${op}"/>`;
+        } else if (s.shapeType === 'ellipse') {
+          inner += `<ellipse ${attr(attrs,'cx','cy','rx','ry')} fill="${s.fill ? s.color : 'none'}" stroke="${s.fill ? 'none' : s.color}" stroke-width="${sw}" opacity="${op}"/>`;
+        } else if (s.shapeType === 'arrow') {
+          inner += `<line x1="${attrs.x1}" y1="${attrs.y1}" x2="${attrs.x2}" y2="${attrs.y2}" stroke="${s.color}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`;
+          inner += `<polygon points="${attrs.x2},${attrs.y2} ${attrs.headX1},${attrs.headY1} ${attrs.headX2},${attrs.headY2}" fill="${s.color}" opacity="${op}"/>`;
+        } else if (s.shapeType === 'triangle') {
+          inner += `<polygon points="${attrs.points}" fill="${s.fill ? s.color : 'none'}" stroke="${s.fill ? 'none' : s.color}" stroke-width="${sw}" stroke-linejoin="round" opacity="${op}"/>`;
+        }
+      } else if (s.d) {
+        if (s.tool === 'pencil') {
+          const paths = s.pencilPaths ?? generatePencilPaths(s.points, s.width);
+          for (const pd of paths) {
+            inner += `<path d="${pd}" fill="none" stroke="${s.color}" stroke-width="${s.width * 0.4}" stroke-linecap="round" stroke-linejoin="round" opacity="${s.opacity * 0.6}"/>`;
+          }
+          inner += `<path d="${s.d}" fill="none" stroke="${s.color}" stroke-width="${s.width * 0.3}" stroke-linecap="round" stroke-linejoin="round" opacity="${s.opacity}"/>`;
+        } else {
+          inner += `<path d="${s.d}" fill="none" stroke="${s.color}" stroke-width="${s.width}" stroke-linecap="round" stroke-linejoin="round" opacity="${s.opacity}"/>`;
+        }
+      }
+    }
+
+    // Current stroke (live preview)
+    if (cur) {
+      if (cur.shapeType) {
+        const attrs = shapeAttrs(cur);
+        const sw = cur.width / 2;
+        if (cur.shapeType === 'line') {
+          inner += `<line ${attr(attrs,'x1','y1','x2','y2')} stroke="${cur.color}" stroke-width="${sw}" stroke-linecap="round" opacity="0.5"/>`;
+        } else if (cur.shapeType === 'rect') {
+          inner += `<rect ${attr(attrs,'x','y','width','height','rx')} fill="${cur.fill ? cur.color : 'none'}" stroke="${cur.fill ? 'none' : cur.color}" stroke-width="${sw}" opacity="0.5"/>`;
+        } else if (cur.shapeType === 'ellipse') {
+          inner += `<ellipse ${attr(attrs,'cx','cy','rx','ry')} fill="${cur.fill ? cur.color : 'none'}" stroke="${cur.fill ? 'none' : cur.color}" stroke-width="${sw}" opacity="0.5"/>`;
+        } else if (cur.shapeType === 'arrow') {
+          inner += `<line x1="${attrs.x1}" y1="${attrs.y1}" x2="${attrs.x2}" y2="${attrs.y2}" stroke="${cur.color}" stroke-width="${sw}" stroke-linecap="round" opacity="0.5"/>`;
+          inner += `<polygon points="${attrs.x2},${attrs.y2} ${attrs.headX1},${attrs.headY1} ${attrs.headX2},${attrs.headY2}" fill="${cur.color}" opacity="0.5"/>`;
+        } else if (cur.shapeType === 'triangle') {
+          inner += `<polygon points="${attrs.points}" fill="${cur.fill ? cur.color : 'none'}" stroke="${cur.fill ? 'none' : cur.color}" stroke-width="${sw}" stroke-linejoin="round" opacity="0.5"/>`;
+        }
+      } else if (cur.tool === 'pencil') {
+        for (const pd of pencilPaths) {
+          inner += `<path d="${pd}" fill="none" stroke="${cur.color}" stroke-width="${cur.width * 0.4}" stroke-linecap="round" stroke-linejoin="round" opacity="${(cur.opacity ?? 0.5) * 0.5}"/>`;
+        }
+        inner += `<path d="${cur.d}" fill="none" stroke="${cur.color}" stroke-width="${cur.width * 0.3}" stroke-linecap="round" stroke-linejoin="round" opacity="${cur.opacity ?? 0.5}"/>`;
+      } else {
+        inner += `<path d="${cur.d}" fill="none" stroke="${cur.color}" stroke-width="${cur.width / 2}" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>`;
+      }
+    }
+
+    const bg = withBg ? `<rect width="100%" height="100%" fill="${bgColor}"/>` : '';
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${bg}${inner}</svg>`;
+  }
+
+  function attr(obj: any, ...keys: string[]): string {
+    return keys.map(k => `${k}="${obj[k] ?? ''}"`).join(' ');
+  }
+
+  // ── Download ────────────────────────────────────────────────────────────
   function downloadPng() {
-    if (!canvasEl) return;
-    const a = document.createElement("a");
-    a.href     = canvasEl.toDataURL("image/png");
-    a.download = saveName;
+    const svgData = renderSvgString(true);
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d')!;
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0);
+      const a = document.createElement('a');
+      a.download = saveName;
+      a.href = canvas.toDataURL('image/png');
+      a.click();
+    };
+    img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+  }
+
+  function downloadSvg() {
+    const svgData = renderSvgString(true);
+    const a = document.createElement('a');
+    a.download = saveName.replace(/\.png$/i, '.svg');
+    a.href = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
     a.click();
   }
 
-  // ── Load image onto canvas ────────────────────────────────────────────────
-  let fileInput: HTMLInputElement;
-  function loadImage() { fileInput?.click(); }
-  function onFileLoad(e: Event) {
-    const file = (e.target as HTMLInputElement).files?.[0];
-    if (!file || !ctx || !canvasEl) return;
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      ctx!.drawImage(img, 0, 0, canvasEl!.width, canvasEl!.height);
-      URL.revokeObjectURL(url);
-      saveSnapshot();
-    };
-    img.src = url;
+  // ── Resize ──────────────────────────────────────────────────────────────
+  let canvasArea: HTMLDivElement;
+
+  function fitToContainer() {
+    if (!canvasArea) return;
+    const rect = canvasArea.getBoundingClientRect();
+    w = Math.max(200, Math.round(rect.width));
+    h = Math.max(200, Math.round(rect.height));
   }
 
-  // ── Palette ───────────────────────────────────────────────────────────────
-  const PALETTE = [
-    "#ffffff","#000000","#f87171","#fb923c","#fbbf24",
-    "#4ade80","#34d399","#38bdf8","#818cf8","#f472b6",
-    "#e2e8f0","#94a3b8","#64748b","#334155","#1e293b",
-  ];
+  onMount(() => {
+    fitToContainer();
+    const ro = new ResizeObserver(fitToContainer);
+    ro.observe(canvasArea);
+    return () => ro.disconnect();
+  });
 
-  // Mobile settings panel toggle
-  let mobilePanelOpen = $state(false);
-
-  const TOOLS: { id: Tool; icon: any; label: string; key: string }[] = [
-    { id: "pen",      icon: IconPencil,   label: "Pen",      key: "P" },
-    { id: "brush",    icon: IconBrush,    label: "Brush",    key: "B" },
-    { id: "eraser",   icon: IconEraser,   label: "Eraser",   key: "E" },
-    { id: "line",     icon: IconSlash,    label: "Line",     key: "L" },
-    { id: "rect",     icon: IconSquare,   label: "Rect",     key: "R" },
-    { id: "ellipse",  icon: IconCircle,   label: "Ellipse",  key: "O" },
-    { id: "arrow",    icon: IconLine,     label: "Arrow",    key: "A" },
-    { id: "triangle", icon: IconTriangle, label: "Triangle", key: "T" },
-  ];
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────
+  function onkeydown(e: KeyboardEvent) {
+    if (e.ctrlKey && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+    if (e.ctrlKey && e.key === 'z' && e.shiftKey) { e.preventDefault(); redo(); }
+    if (e.key === 'Escape') clearAll();
+  }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onkeydown}/>
 
-<div class="draw-root">
-  <!-- Left toolbar -->
-  <aside class="toolbar">
-    <div class="tool-group">
-      {#each TOOLS as t}
-        <button
-          class="tool-btn"
-          class:active={tool === t.id}
-          title="{t.label} ({t.key})"
-          onclick={() => tool = t.id}
-        >
-          <t.icon size={17} stroke={1.6} />
-        </button>
-      {/each}
+<div class="draw-wrap" role="application" tabindex="-1">
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="tb-group">
+      <button class="tb-btn" class:active={tool==='pen'} onclick={() => tool='pen'} title="Pen"><IconPencil size={15}/></button>
+      <button class="tb-btn" class:active={tool==='pencil'} onclick={() => tool='pencil'} title="Pencil (textured)"><IconSlash size={15}/></button>
+      <button class="tb-btn" class:active={tool==='brush'} onclick={() => tool='brush'} title="Brush (pressure)"><IconBrush size={15}/></button>
+      <button class="tb-btn" class:active={tool==='eraser'} onclick={() => tool='eraser'} title="Eraser"><IconEraser size={15}/></button>
     </div>
 
-    <div class="divider"></div>
+    <div class="tb-sep"/>
 
-    <div class="tool-group">
-      <button class="tool-btn" class:active={fill} title="Fill shapes" onclick={() => fill = !fill}>
-        <IconPentagon size={17} stroke={1.6} />
-      </button>
+    <div class="tb-group">
+      <button class="tb-btn" class:active={tool==='line'} onclick={() => tool='line'} title="Line"><IconMinus size={15}/></button>
+      <button class="tb-btn" class:active={tool==='rect'} onclick={() => tool='rect'} title="Rectangle"><IconSquare size={15}/></button>
+      <button class="tb-btn" class:active={tool==='ellipse'} onclick={() => tool='ellipse'} title="Ellipse"><IconCircle size={15}/></button>
+      <button class="tb-btn" class:active={tool==='arrow'} onclick={() => tool='arrow'} title="Arrow"><IconArrowBadgeRight size={15}/></button>
+      <button class="tb-btn" class:active={tool==='triangle'} onclick={() => tool='triangle'} title="Triangle"><IconTriangle size={15}/></button>
     </div>
 
-    <div class="divider"></div>
+    <div class="tb-sep"/>
 
-    <div class="tool-group">
-      <button class="tool-btn" title="Undo (Ctrl+Z)" onclick={undo}><IconArrowBack size={17} stroke={1.6} /></button>
-      <button class="tool-btn" title="Redo (Ctrl+Y)" onclick={redo}><IconArrowForward size={17} stroke={1.6} /></button>
+    <div class="tb-group">
+      <button class="tb-btn" onclick={undo} disabled={historyIdx < 0} title="Undo (Ctrl+Z)"><IconArrowBack size={15}/></button>
+      <button class="tb-btn" onclick={redo} disabled={historyIdx >= strokes.length - 1} title="Redo (Ctrl+Shift+Z)"><IconArrowForward size={15}/></button>
+      <button class="tb-btn" onclick={clearAll} disabled={strokes.length === 0} title="Clear all"><IconTrash size={15}/></button>
     </div>
 
-    <div class="divider"></div>
+    <div class="tb-sep"/>
 
-    <div class="tool-group">
-      <button class="tool-btn danger" title="Clear canvas" onclick={clearCanvas}><IconTrash size={17} stroke={1.6} /></button>
+    <div class="tb-group tb-colors">
+      <label class="color-label" title="Stroke color">
+        <span class="color-swatch" style="background:{color}"/>
+        <input type="color" bind:value={color} class="color-input"/>
+      </label>
     </div>
-  </aside>
 
-  <!-- Canvas area -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="canvas-wrap">
-    <canvas
-      bind:this={canvasEl}
-      onmousedown={startDraw}
-      onmousemove={draw}
-      onmouseup={endDraw}
-      onmouseleave={endDraw}
-      ontouchstart={startDraw}
-      ontouchmove={draw}
-      ontouchend={endDraw}
-      style="cursor: {tool === 'eraser' ? 'cell' : 'crosshair'}"
-    ></canvas>
+    <div class="tb-group tb-sliders">
+      <label class="slider-label" title="Stroke width">
+        <span class="slider-icon">●</span>
+        <input type="range" min="0.5" max="40" step="0.5" bind:value={lineWidth}/>
+      </label>
+      <label class="slider-label" title="Opacity">
+        <span class="slider-icon" style="opacity:{opacity/100}">●</span>
+        <input type="range" min="5" max="100" bind:value={opacity}/>
+      </label>
+      {#if tool === 'pencil'}
+        <label class="slider-label" title="Hardness (higher = crisper)">
+          <span class="slider-icon">H</span>
+          <input type="range" min="1" max="100" bind:value={hardness}/>
+        </label>
+      {/if}
+      <label class="slider-label" title="Fill shapes">
+        <input type="checkbox" bind:checked={fill}/>
+        <span class="slider-icon">F</span>
+      </label>
+    </div>
   </div>
 
-  <!-- Right panel -->
-  <aside class="panel">
-    <section class="panel-section">
-      <span class="panel-label">Color</span>
-      <input type="color" class="color-pick" bind:value={color} title="Stroke color" />
-      <div class="palette">
-        {#each PALETTE as c}
-          <button
-            class="swatch"
-            class:selected={color === c}
-            style="background:{c};"
-            onclick={() => color = c}
-            title={c}
-          ></button>
-        {/each}
-      </div>
-    </section>
+  <!-- SVG Canvas -->
+  <div class="canvas-area" bind:this={canvasArea}>
+    <svg
+      bind:this={svgEl}
+      viewBox="0 0 {w} {h}"
+      class="draw-svg"
+      onpointerdown={pointerDown}
+      onpointermove={pointerMove}
+      onpointerup={pointerUp}
+      onpointerleave={pointerUp}
+      style="touch-action:none"
+    >
+      <rect width="100%" height="100%" fill={bgColor}/>
 
-    <section class="panel-section">
-      <span class="panel-label">Background</span>
-      <input type="color" class="color-pick" bind:value={bgColor} title="Canvas background" />
-    </section>
+      {#each strokes.slice(0, historyIdx + 1) as s}
+        {#if s.shapeType}
+          {#if s.shapeType === 'line'}
+            <line x1={s.sx} y1={s.sy} x2={s.ex} y2={s.ey} stroke={s.color} stroke-width={s.width} stroke-linecap="round" opacity={s.opacity}/>
+          {:else if s.shapeType === 'rect'}
+            <rect x={Math.min(s.sx,s.ex)} y={Math.min(s.sy,s.ey)} width={Math.abs(s.ex-s.sx)} height={Math.abs(s.ey-s.sy)}
+              fill={s.fill ? s.color : 'none'} stroke={s.fill ? 'none' : s.color} stroke-width={s.width} opacity={s.opacity}/>
+          {:else if s.shapeType === 'ellipse'}
+            <ellipse cx={(s.sx+s.ex)/2} cy={(s.sy+s.ey)/2} rx={Math.abs(s.ex-s.sx)/2} ry={Math.abs(s.ey-s.sy)/2}
+              fill={s.fill ? s.color : 'none'} stroke={s.fill ? 'none' : s.color} stroke-width={s.width} opacity={s.opacity}/>
+          {:else if s.shapeType === 'arrow'}
+            {@const sa = shapeAttrs(s)}
+            <line x1={sa.x1} y1={sa.y1} x2={sa.x2} y2={sa.y2} stroke={s.color} stroke-width={s.width} stroke-linecap="round" opacity={s.opacity}/>
+            <polygon points={`${sa.x2},${sa.y2} ${sa.headX1},${sa.headY1} ${sa.headX2},${sa.headY2}`} fill={s.color} opacity={s.opacity}/>
+          {:else if s.shapeType === 'triangle'}
+            <polygon points={Math.min(s.sx,s.ex)+Math.abs(s.ex-s.sx)/2},{Math.min(s.sy,s.ey)} {Math.min(s.sx,s.ex)},{s.ey} {s.ex},{s.ey}
+              fill={s.fill ? s.color : 'none'} stroke={s.fill ? 'none' : s.color} stroke-width={s.width} stroke-linejoin="round" opacity={s.opacity}/>
+          {/if}
+        {:else if s.d}
+          {#if s.tool === 'pencil'}
+            {#each s.pencilPaths ?? [] as pd}
+              <path d={pd} fill="none" stroke={s.color} stroke-width={s.width*0.4} stroke-linecap="round" stroke-linejoin="round" opacity={s.opacity*0.6}/>
+            {/each}
+            <path d={s.d} fill="none" stroke={s.color} stroke-width={s.width*0.3} stroke-linecap="round" stroke-linejoin="round" opacity={s.opacity}/>
+          {:else}
+            <path d={s.d} fill="none" stroke={s.color} stroke-width={s.width} stroke-linecap="round" stroke-linejoin="round" opacity={s.opacity}/>
+          {/if}
+        {/if}
+      {/each}
 
-    <section class="panel-section">
-      <div class="slider-row">
-        <span class="panel-label">Size</span>
-        <span class="slider-val">{lineWidth}px</span>
-      </div>
-      <input type="range" class="slider" min="1" max="80" bind:value={lineWidth} />
-    </section>
+      <!-- Live preview of current stroke -->
+      {#if currentStroke}
+        {#if currentStroke.shapeType}
+          {#if currentStroke.shapeType === 'line'}
+            <line x1={currentStroke.sx} y1={currentStroke.sy} x2={currentStroke.ex} y2={currentStroke.ey}
+              stroke={currentStroke.color} stroke-width={currentStroke.width/2} stroke-linecap="round" opacity="0.5"/>
+          {:else if currentStroke.shapeType === 'rect'}
+            <rect x={Math.min(currentStroke.sx,currentStroke.ex)} y={Math.min(currentStroke.sy,currentStroke.ey)}
+              width={Math.abs(currentStroke.ex-currentStroke.sx)} height={Math.abs(currentStroke.ey-currentStroke.sy)}
+              fill={currentStroke.fill ? currentStroke.color : 'none'} stroke={currentStroke.fill ? 'none' : currentStroke.color}
+              stroke-width={currentStroke.width/2} opacity="0.5"/>
+          {:else if currentStroke.shapeType === 'ellipse'}
+            <ellipse cx={(currentStroke.sx+currentStroke.ex)/2} cy={(currentStroke.sy+currentStroke.ey)/2}
+              rx={Math.abs(currentStroke.ex-currentStroke.sx)/2} ry={Math.abs(currentStroke.ey-currentStroke.sy)/2}
+              fill={currentStroke.fill ? currentStroke.color : 'none'} stroke={currentStroke.fill ? 'none' : currentStroke.color}
+              stroke-width={currentStroke.width/2} opacity="0.5"/>
+          {:else if currentStroke.shapeType === 'arrow'}
+            {@const sa = shapeAttrs(currentStroke)}
+            <line x1={sa.x1} y1={sa.y1} x2={sa.x2} y2={sa.y2} stroke={currentStroke.color} stroke-width={currentStroke.width/2} stroke-linecap="round" opacity="0.5"/>
+            <polygon points={`${sa.x2},${sa.y2} ${sa.headX1},${sa.headY1} ${sa.headX2},${sa.headY2}`} fill={currentStroke.color} opacity="0.5"/>
+          {:else if currentStroke.shapeType === 'triangle'}
+            <polygon points={Math.min(currentStroke.sx,currentStroke.ex)+Math.abs(currentStroke.ex-currentStroke.sx)/2},{Math.min(currentStroke.sy,currentStroke.ey)} {Math.min(currentStroke.sx,currentStroke.ex)},{currentStroke.ey} {currentStroke.ex},{currentStroke.ey}
+              fill={currentStroke.fill ? currentStroke.color : 'none'} stroke={currentStroke.fill ? 'none' : currentStroke.color}
+              stroke-width={currentStroke.width/2} stroke-linejoin="round" opacity="0.5"/>
+          {/if}
+        {:else}
+          {#if currentStroke.tool === 'pencil'}
+            {#each pencilPaths as pd}
+              <path d={pd} fill="none" stroke={currentStroke.color} stroke-width={currentStroke.width*0.4} stroke-linecap="round" stroke-linejoin="round" opacity={(currentStroke.opacity??0.5)*0.5}/>
+            {/each}
+          {/if}
+          <path d={currentStroke.d} fill="none" stroke={currentStroke.color} stroke-width={currentStroke.tool==='brush'?currentStroke.width:currentStroke.width/2}
+            stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+        {/if}
+      {/if}
+    </svg>
+  </div>
 
-    <section class="panel-section">
-      <div class="slider-row">
-        <span class="panel-label">Opacity</span>
-        <span class="slider-val">{opacity}%</span>
-      </div>
-      <input type="range" class="slider" min="1" max="100" bind:value={opacity} />
-    </section>
-
-    {#if tool === "brush"}
-      <section class="panel-section">
-        <div class="slider-row">
-          <span class="panel-label">Hardness</span>
-          <span class="slider-val">{hardness}%</span>
-        </div>
-        <input type="range" class="slider" min="0" max="100" bind:value={hardness} />
-      </section>
-    {/if}
-
-    <div class="divider"></div>
-
-    <section class="panel-section">
-      <span class="panel-label">Filename</span>
-      <input class="name-input" type="text" bind:value={saveName} placeholder="drawing.png" />
-    </section>
-
-    <section class="panel-section actions">
-      <button class="action-btn" onclick={downloadPng} title="Download PNG locally">
-        <IconDownload size={14} /> Download
-      </button>
-      <button class="action-btn primary" onclick={saveToCloud} disabled={saving} title="Save to your cloud">
-        <IconUpload size={14} /> {saving ? "Saving…" : "Save to Cloud"}
-      </button>
-      <button class="action-btn" onclick={loadImage} title="Load image onto canvas">
-        <IconUpload size={14} /> Load Image
-      </button>
+  <!-- Bottom bar -->
+  <div class="bottom-bar">
+    <div class="bb-left">
+      <span class="bb-stats">{historyIdx + 1} strokes</span>
+    </div>
+    <div class="bb-right">
+      <input class="fname-input" bind:value={saveName} placeholder="drawing.png"/>
       {#if saveOk}
-        <span class="save-ok">✓ Saved to cloud!</span>
+        <span class="save-ok">✓ Saved!</span>
       {/if}
       {#if saveError}
         <span class="save-err">{saveError}</span>
       {/if}
-    </section>
-
-    <div class="divider"></div>
-
-    <section class="panel-section">
-      <span class="panel-label" style="color:var(--text-3); font-size:10px;">
-        P pen · B brush · E eraser · L line<br>
-        R rect · O ellipse · A arrow · T triangle<br>
-        Ctrl+Z undo · Ctrl+Y redo
-      </span>
-    </section>
-  </aside>
-
-  <input bind:this={fileInput} type="file" accept="image/*" style="display:none" onchange={onFileLoad} />
-
-  <!-- Mobile bottom toolbar -->
-  <div class="mob-toolbar">
-    <div class="mob-tools">
-      {#each TOOLS as t}
-        <button class="mob-tool-btn" class:active={tool === t.id} title={t.label} onclick={() => tool = t.id}>
-          <t.icon size={20} stroke={1.6}/>
-        </button>
-      {/each}
-      <div class="mob-sep"></div>
-      <button class="mob-tool-btn" class:active={fill} onclick={() => fill = !fill} title="Fill">
-        <IconPentagon size={20} stroke={1.6}/>
-      </button>
-      <button class="mob-tool-btn" onclick={undo} title="Undo"><IconArrowBack size={20} stroke={1.6}/></button>
-      <button class="mob-tool-btn" onclick={redo} title="Redo"><IconArrowForward size={20} stroke={1.6}/></button>
-      <button class="mob-tool-btn danger" onclick={clearCanvas} title="Clear"><IconTrash size={20} stroke={1.6}/></button>
-      <div class="mob-sep"></div>
-      <button class="mob-tool-btn settings" onclick={() => mobilePanelOpen = !mobilePanelOpen} title="Settings">
-        <span style="font-size:18px">⚙</span>
+      <button class="action-btn" onclick={downloadPng} title="Download PNG"><IconDownload size={14}/> PNG</button>
+      <button class="action-btn" onclick={downloadSvg} title="Download SVG"><IconDownload size={14}/> SVG</button>
+      <button class="action-btn primary" onclick={saveToCloud} disabled={saving} title="Save to your cloud">
+        {saving ? "Saving…" : <svelte:fragment><IconUpload size={14}/> Save</svelte:fragment>}
       </button>
     </div>
   </div>
-
-  <!-- Mobile settings drawer -->
-  {#if mobilePanelOpen}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div class="mob-overlay" onclick={() => mobilePanelOpen = false}></div>
-    <div class="mob-drawer">
-      <div class="mob-drawer-handle"></div>
-      <div class="mob-drawer-content">
-        <div class="mob-row">
-          <span class="panel-label">Color</span>
-          <input type="color" class="color-pick-sm" bind:value={color} />
-          <span class="panel-label">Background</span>
-          <input type="color" class="color-pick-sm" bind:value={bgColor} />
-        </div>
-        <div class="palette mob-palette">
-          {#each PALETTE as c}
-            <button class="swatch" class:selected={color === c} style="background:{c};" onclick={() => { color = c; }}></button>
-          {/each}
-        </div>
-        <div class="mob-row">
-          <span class="panel-label">Size {lineWidth}px</span>
-          <input type="range" class="slider mob-slider" min="1" max="80" bind:value={lineWidth} />
-        </div>
-        <div class="mob-row">
-          <span class="panel-label">Opacity {opacity}%</span>
-          <input type="range" class="slider mob-slider" min="1" max="100" bind:value={opacity} />
-        </div>
-        {#if tool === "brush"}
-          <div class="mob-row">
-            <span class="panel-label">Hardness {hardness}%</span>
-            <input type="range" class="slider mob-slider" min="0" max="100" bind:value={hardness} />
-          </div>
-        {/if}
-        <div class="mob-row">
-          <input class="name-input" type="text" bind:value={saveName} placeholder="filename.png" style="flex:1"/>
-        </div>
-        <div class="mob-actions">
-          <button class="action-btn" onclick={downloadPng}><IconDownload size={14}/> Download</button>
-          <button class="action-btn primary" onclick={saveToCloud} disabled={saving}><IconUpload size={14}/> {saving ? "Saving…" : "Save"}</button>
-          <button class="action-btn" onclick={loadImage}><IconUpload size={14}/> Load</button>
-        </div>
-        {#if saveOk}<span class="save-ok">✓ Saved!</span>{/if}
-        {#if saveError}<span class="save-err">{saveError}</span>{/if}
-      </div>
-    </div>
-  {/if}
 </div>
 
 <style>
-  .draw-root {
-    display: flex;
-    height: 100vh;
+  .draw-wrap {
+    display: flex; flex-direction: column;
+    height: 100%; width: 100%;
     background: var(--bg-1);
-    overflow: hidden;
+    user-select: none;
   }
 
-  /* ── Left toolbar ── */
   .toolbar {
-    width: 48px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 10px 6px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px;
     background: var(--bg-2);
-    border-right: 1px solid var(--border);
-    flex-shrink: 0;
-    overflow-y: auto;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
   }
-  .tool-group {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    width: 100%;
-  }
-  .tool-btn {
-    width: 36px;
-    height: 36px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: none;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    color: var(--text-3);
-    cursor: pointer;
-    transition: all 0.12s;
-    flex-shrink: 0;
-  }
-  .tool-btn:hover { background: var(--hover); color: var(--text-1); border-color: var(--border); }
-  .tool-btn.active { background: var(--hover); color: var(--accent); border-color: var(--accent); }
-  .tool-btn.danger:hover { color: var(--red); border-color: var(--red-border); }
-
-  /* ── Canvas ── */
-  .canvas-wrap {
-    flex: 1;
-    overflow: hidden;
-    position: relative;
-    background: #1a1a1a;
-  }
-  canvas {
-    display: block;
-    width: 100%;
-    height: 100%;
-    touch-action: none;
-  }
-
-  /* ── Right panel ── */
-  .panel {
-    width: 200px;
-    flex-shrink: 0;
-    background: var(--bg-2);
-    border-left: 1px solid var(--border);
-    overflow-y: auto;
-    padding: 12px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .panel-section {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .panel-section.actions { gap: 4px; }
-  .panel-label {
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-3);
-    letter-spacing: .04em;
-    text-transform: uppercase;
-  }
-  .divider {
-    height: 1px;
+  .tb-group { display: flex; align-items: center; gap: 2px; }
+  .tb-sep {
+    width: 1px; height: 20px;
     background: var(--border);
-    margin: 6px 0;
     flex-shrink: 0;
   }
+  .tb-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: 7px;
+    background: none; border: none;
+    color: var(--text-2); cursor: pointer;
+    transition: .13s;
+  }
+  .tb-btn:hover { background: var(--hover); color: var(--text-1); }
+  .tb-btn.active { background: var(--accent); color: #fff; }
+  .tb-btn:disabled { opacity: .25; cursor: default; }
 
-  /* color picker */
-  .color-pick {
-    width: 100%;
-    height: 32px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: none;
-    cursor: pointer;
-    padding: 2px;
+  .color-label {
+    position: relative; cursor: pointer;
+    display: flex; align-items: center; gap: 4px;
   }
-  .palette {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 4px;
+  .color-swatch {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 2px solid var(--border);
+    display: block;
   }
-  .swatch {
-    width: 100%;
-    aspect-ratio: 1;
-    border-radius: 4px;
-    border: 2px solid transparent;
-    cursor: pointer;
-    transition: border-color 0.1s, transform 0.1s;
+  .color-input {
+    position: absolute; opacity: 0; width: 0; height: 0;
   }
-  .swatch:hover { transform: scale(1.15); }
-  .swatch.selected { border-color: var(--accent); }
 
-  /* sliders */
-  .slider-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+  .slider-label {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 11px; color: var(--text-3);
   }
-  .slider-val {
-    font-size: 11px;
-    font-family: "Geist Mono", monospace;
-    color: var(--text-2);
-  }
-  .slider {
-    width: 100%;
+  .slider-label input[type="range"] {
+    width: 48px; height: 4px;
     accent-color: var(--accent);
-    cursor: pointer;
+  }
+  .slider-label input[type="checkbox"] {
+    width: 14px; height: 14px;
+    accent-color: var(--accent);
+  }
+  .slider-icon {
+    width: 16px; text-align: center;
+    font-size: 10px; flex-shrink: 0;
+  }
+  .tb-sliders { gap: 8px; flex-wrap: wrap; }
+
+  .canvas-area {
+    flex: 1; display: flex; overflow: hidden;
+    min-height: 0;
+  }
+  .draw-svg {
+    width: 100%; height: 100%;
+    display: block;
+    cursor: crosshair;
   }
 
-  /* filename */
-  .name-input {
-    width: 100%;
-    background: var(--bg-1);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 5px 8px;
-    color: var(--text-1);
-    font-size: 12px;
-    font-family: "Geist", sans-serif;
-    outline: none;
-    box-sizing: border-box;
+  .bottom-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px;
+    background: var(--bg-2);
+    border-top: 1px solid var(--border);
+    gap: 8px; flex-wrap: wrap;
   }
-  .name-input:focus { border-color: var(--border-hover); }
-
-  /* action buttons */
+  .bb-left { display: flex; align-items: center; gap: 8px; }
+  .bb-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .bb-stats { font-size: 11px; color: var(--text-3); font-family: 'Geist Mono', monospace; }
+  .fname-input {
+    background: var(--bg-1); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 8px;
+    color: var(--text-1); font-size: 12px;
+    font-family: 'Geist Mono', monospace;
+    width: 120px; outline: none;
+  }
+  .fname-input:focus { border-color: var(--border-hover); }
   .action-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 7px 10px;
-    background: none;
+    display: flex; align-items: center; gap: 5px;
+    padding: 5px 12px; border-radius: 7px;
     border: 1px solid var(--border);
-    border-radius: 7px;
-    color: var(--text-2);
-    font-size: 12px;
-    font-family: "Geist", sans-serif;
-    cursor: pointer;
-    transition: background 0.1s, border-color 0.1s;
+    background: var(--bg-1); color: var(--text-2);
+    font-size: 12px; font-family: 'Geist', sans-serif;
+    cursor: pointer; transition: .13s;
   }
-  .action-btn:hover { background: var(--bg-3); border-color: var(--border-hover); color: var(--text-1); }
-  .action-btn.primary { border-color: var(--accent); color: var(--accent); }
-  .action-btn.primary:hover { background: rgba(99,102,241,.1); }
-  .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-  .save-ok  { font-size: 11px; color: var(--green); }
-  .save-err { font-size: 11px; color: var(--red); }
-
-  /* ── Mobile ── */
-  .mob-toolbar { display: none; }
-  .mob-overlay { display: none; }
-  .mob-drawer  { display: none; }
-
-  @media (max-width: 640px) {
-    .toolbar { display: none; }
-    .panel   { display: none; }
-
-    .draw-root { flex-direction: column; }
-    .canvas-wrap { flex: 1; height: calc(100vh - 130px); }
-
-    /* Horizontal scrollable tool strip */
-    .mob-toolbar {
-      display: flex;
-      position: fixed;
-      bottom: 62px; /* above mobile nav */
-      left: 0; right: 0;
-      z-index: 50;
-      background: var(--bg-2);
-      border-top: 1px solid var(--border);
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: none;
-      padding: 6px 8px;
-      gap: 2px;
-    }
-    .mob-toolbar::-webkit-scrollbar { display: none; }
-    .mob-tools {
-      display: flex;
-      align-items: center;
-      gap: 2px;
-      flex-shrink: 0;
-    }
-    .mob-tool-btn {
-      width: 40px; height: 40px;
-      display: flex; align-items: center; justify-content: center;
-      background: none;
-      border: 1px solid transparent;
-      border-radius: 8px;
-      color: var(--text-3);
-      cursor: pointer;
-      transition: all 0.12s;
-      flex-shrink: 0;
-    }
-    .mob-tool-btn:active { transform: scale(0.9); }
-    .mob-tool-btn.active { background: var(--hover); color: var(--accent); border-color: var(--accent); }
-    .mob-tool-btn.danger:active { color: var(--red); }
-    .mob-tool-btn.settings { color: var(--text-2); }
-    .mob-sep { width: 1px; height: 24px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
-
-    /* Settings drawer */
-    .mob-overlay {
-      display: block;
-      position: fixed; inset: 0; z-index: 90;
-      background: rgba(0,0,0,.4);
-    }
-    .mob-drawer {
-      display: flex; flex-direction: column;
-      position: fixed; left: 0; right: 0; bottom: 62px; z-index: 91;
-      background: var(--bg-2);
-      border-top: 1px solid var(--border);
-      border-radius: 20px 20px 0 0;
-      padding: 0 16px 16px;
-      max-height: 70vh;
-      overflow-y: auto;
-    }
-    .mob-drawer-handle {
-      width: 36px; height: 4px;
-      background: var(--border-hover);
-      border-radius: 2px;
-      margin: 12px auto 10px;
-      flex-shrink: 0;
-    }
-    .mob-drawer-content { display: flex; flex-direction: column; gap: 10px; }
-    .mob-row { display: flex; align-items: center; gap: 10px; }
-    .mob-slider { flex: 1; }
-    .mob-palette { grid-template-columns: repeat(15, 1fr); }
-    .color-pick-sm {
-      width: 36px; height: 32px;
-      border-radius: 6px; border: 1px solid var(--border);
-      background: none; cursor: pointer; padding: 2px;
-    }
-    .mob-actions { display: flex; gap: 6px; }
-    .mob-actions .action-btn { flex: 1; justify-content: center; font-size: 11px; padding: 8px 6px; }
+  .action-btn:hover { border-color: var(--border-hover); color: var(--text-1); background: var(--hover); }
+  .action-btn.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff;
   }
+  .action-btn.primary:hover { opacity: .88; }
+  .action-btn.primary:disabled { opacity: .5; cursor: not-allowed; }
+  .save-ok { color: var(--green); font-size: 12px; }
+  .save-err { color: var(--red); font-size: 12px; }
 </style>
