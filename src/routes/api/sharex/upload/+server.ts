@@ -84,15 +84,14 @@ async function getOrCreateSharexFolder(): Promise<string> {
 async function uploadChunkWithRetry(tmpPath: string, filename: string, retries = 3): Promise<{ message_id: number; file_id: string }> {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
+      const buffer = await fs.promises.readFile(tmpPath);
+      const form = new FormData();
+      form.append('chat_id', process.env.TELEGRAM_BACKUP_CHAT_ID!);
+      form.append('document', new Blob([buffer]), filename);
+
       const res = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendDocument`, {
         method: 'POST',
-        body: (() => {
-          const form = new FormData();
-          form.append('chat_id', process.env.TELEGRAM_BACKUP_CHAT_ID!);
-          const blob = new Blob([await fs.promises.readFile(tmpPath)]);
-          form.append('document', blob, filename);
-          return form;
-        })()
+        body: form
       });
       const json = await res.json();
       if (json?.ok) {
@@ -163,15 +162,14 @@ export const POST: RequestHandler = async ({ request }) => {
     let metaMessageId: number;
 
     try {
+      const metaBuffer = await fs.promises.readFile(tmpMeta);
+      const metaForm = new FormData();
+      metaForm.append('chat_id', process.env.TELEGRAM_BACKUP_CHAT_ID!);
+      metaForm.append('document', new Blob([metaBuffer]), `${fileName}.json`);
+
       const metaRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendDocument`, {
         method: 'POST',
-        body: (() => {
-          const form = new FormData();
-          form.append('chat_id', process.env.TELEGRAM_BACKUP_CHAT_ID!);
-          const blob = new Blob([await fs.promises.readFile(tmpMeta)]);
-          form.append('document', blob, `${fileName}.json`);
-          return form;
-        })()
+        body: metaForm
       });
       const metaJson = await metaRes.json();
       if (!metaJson?.ok) throw new Error('Meta upload failed');
