@@ -10,7 +10,7 @@
   } from "@tabler/icons-svelte";
   import type { Tool, Point, Stroke, Layer, BrushPreset, HistoryEntry, CanvasSettings } from "./types";
   import { BRUSH_PRESETS } from "./presets";
-  import { Stabilizer, applyPressureCurve, smoothPath, variableWidthPath, generatePencilPaths, shapeAttrs, escapeXml, minDistFilter } from "./engine";
+  import { Stabilizer, smoothPath, variableWidthPath, generatePencilPaths, shapeAttrs, escapeXml, minDistFilter } from "./engine";
   import ColorPicker from "./ColorPicker.svelte";
 
   let { apiKey }: { apiKey: string } = $props();
@@ -398,7 +398,6 @@
 
   function commitText() {
     if (!textEditing || !textEditContent.trim()) { textEditing = false; return; }
-    const lines = textEditContent.split("\n");
     const s: Stroke = {
       id: uid(), tool: "text", color: fgColor, baseWidth: lineWidth,
       opacity: opacity / 100, fill: false,
@@ -460,24 +459,20 @@
 
     if (s.text) {
       const anchor = s.textAlign === "center" ? "middle" : s.textAlign === "right" ? "end" : "start";
-      const tx = s.textAlign === "center" ? s.points[0]?.x : s.textAlign === "right" ? s.points[0]?.x : s.points[0]?.x;
       const lines = s.text.split("\n");
       const lh = (s.fontSize ?? 32) * 1.2;
       let txt = "";
       for (let i = 0; i < lines.length; i++) {
-        const ty = s.points[0]?.y + (i + 1) * lh;
         const escaped = escapeXml(lines[i]);
-        txt += `<tspan x="${s.points[0]?.x}" dy="${i === 0 ? 0 : lh}" text-anchor="${anchor}">${escaped}</tspan>`;
+        txt += `<tspan x="${s.points[0]?.x}" dy="${i === 0 ? 0 : lh}">${escaped}</tspan>`;
       }
       return `<text x="${s.points[0]?.x}" y="${s.points[0]?.y}" fill="${s.color}" font-size="${s.fontSize ?? 32}" font-family="${s.fontFamily ?? 'sans-serif'}" font-weight="${s.fontWeight ?? '400'}" font-style="${s.fontStyle ?? 'normal'}" text-anchor="${anchor}" opacity="${op}" dominant-baseline="auto">${txt}</text>`;
     }
 
-    // Variable-width path (pro rendering)
     if (s.variableWidthPath) {
       return `<path d="${s.variableWidthPath}" fill="${s.color}" opacity="${op}" fill-rule="evenodd"/>`;
     }
 
-    // Pencil multi-stroke
     if (s.tool === "pencil") {
       let r = "";
       for (const pd of s.pencilPaths ?? []) {
@@ -631,6 +626,7 @@
 
   // ── Init ────────────────────────────────────────────────────────────
   onMount(() => {
+    if (!canvasWrap) return;
     const ro = new ResizeObserver(() => { fitToScreen(); });
     ro.observe(canvasWrap);
     fitToScreen();
@@ -648,10 +644,33 @@
   // Grid ruler ticks
   let rulerTickStep = $derived(zoom > 2 ? 25 : zoom > 0.8 ? 50 : 100);
 
+  // ── Menu state ──────────────────────────────────────────────────────
+  let openMenu = $state<string | null>(null);
+
+  function menuAction(action: string) {
+    openMenu = null;
+    switch (action) {
+      case "new": clearAll(); break;
+      case "save-png": downloadPng(); break;
+      case "save-svg": downloadSvg(); break;
+      case "save-cloud": saveToCloud(); break;
+      case "undo": undo(); break;
+      case "redo": redo(); break;
+      case "clear": clearAll(); break;
+      case "fit": fitToScreen(); break;
+      case "zoom-100": zoomTo(1); break;
+      case "zoom-in": zoomTo(Math.min(MAX_ZOOM, zoom * 1.5)); break;
+      case "zoom-out": zoomTo(Math.max(MIN_ZOOM, zoom / 1.5)); break;
+      case "grid": settings.showGrid = !settings.showGrid; break;
+      case "rulers": settings.showRulers = !settings.showRulers; break;
+      case "flip-h": break;
+      case "flip-v": break;
+    }
+  }
+
   // ── Ruler actions ───────────────────────────────────────────────────
-  function rulerHAction(canvas: HTMLCanvasElement, params: () => any) {
-    function draw() {
-      const p = params();
+  function rulerHAction(canvas: HTMLCanvasElement, params: { zoom: number; panX: number; w: number }) {
+    function draw(p = params) {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       const dpr = globalThis.devicePixelRatio || 1;
@@ -661,11 +680,10 @@
       canvas.height = ch * dpr;
       canvas.style.width = cw + "px";
       canvas.style.height = ch + "px";
-      ctx.scale(dpr, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, cw, ch);
       ctx.fillStyle = "#26262a";
       ctx.fillRect(0, 0, cw, ch);
-      // Get SVG position within container
       const svgRect = svgEl?.getBoundingClientRect();
       const wrapRect = canvasWrap?.getBoundingClientRect();
       if (!svgRect || !wrapRect) return;
@@ -692,12 +710,17 @@
       ctx.stroke();
     }
     draw();
-    return { update() { draw(); }, destroy() {} };
+    return {
+      update(next: { zoom: number; panX: number; w: number }) {
+        params = next;
+        draw(next);
+      },
+      destroy() {},
+    };
   }
 
-  function rulerVAction(canvas: HTMLCanvasElement, params: () => any) {
-    function draw() {
-      const p = params();
+  function rulerVAction(canvas: HTMLCanvasElement, params: { zoom: number; panY: number; h: number }) {
+    function draw(p = params) {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       const dpr = globalThis.devicePixelRatio || 1;
@@ -707,7 +730,7 @@
       canvas.height = ch * dpr;
       canvas.style.width = cw + "px";
       canvas.style.height = ch + "px";
-      ctx.scale(dpr, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, cw, ch);
       ctx.fillStyle = "#26262a";
       ctx.fillRect(0, 0, cw, ch);
@@ -741,32 +764,13 @@
       ctx.stroke();
     }
     draw();
-    return { update() { draw(); }, destroy() {} };
-  }
-</script>
-
-  // ── Menu state ──────────────────────────────────────────────────────
-  let openMenu = $state<string | null>(null);
-
-  function menuAction(action: string) {
-    openMenu = null;
-    switch (action) {
-      case "new": clearAll(); break;
-      case "save-png": downloadPng(); break;
-      case "save-svg": downloadSvg(); break;
-      case "save-cloud": saveToCloud(); break;
-      case "undo": undo(); break;
-      case "redo": redo(); break;
-      case "clear": clearAll(); break;
-      case "fit": fitToScreen(); break;
-      case "zoom-100": zoomTo(1); break;
-      case "zoom-in": zoomTo(Math.min(MAX_ZOOM, zoom * 1.5)); break;
-      case "zoom-out": zoomTo(Math.max(MIN_ZOOM, zoom / 1.5)); break;
-      case "grid": settings.showGrid = !settings.showGrid; break;
-      case "rulers": settings.showRulers = !settings.showRulers; break;
-      case "flip-h": /* TODO */ break;
-      case "flip-v": /* TODO */ break;
-    }
+    return {
+      update(next: { zoom: number; panY: number; h: number }) {
+        params = next;
+        draw(next);
+      },
+      destroy() {},
+    };
   }
 </script>
 
@@ -800,7 +804,7 @@
         { label: settings.showRulers ? "✓ Rulers" : "  Rulers", action: "rulers", key: "R" },
       ]},
       { label: "Image", items: [
-        { label: "Canvas Size: {w}×{h}", action: "", key: "" },
+        { label: `Canvas Size: ${w}×${h}`, action: "", key: "" },
         { label: "---" },
         { label: "Flip Horizontal", action: "flip-h", key: "" },
         { label: "Flip Vertical", action: "flip-v", key: "" },
@@ -821,7 +825,7 @@
               {#if item.label === "---"}
                 <div class="mb-sep"></div>
               {:else}
-                <button class="mb-option" onclick={(e) => { e.stopPropagation(); menuAction(item.action); }}>
+                <button class="mb-option" onclick={(e) => { e.stopPropagation(); if (item.action) menuAction(item.action); }}>
                   <span>{item.label}</span>
                   {#if item.key}<span class="mb-key">{item.key}</span>{/if}
                 </button>
@@ -838,337 +842,324 @@
   </div>
 
   <div class="main-row">
-  <!-- ═══ LEFT TOOLBAR ═══ -->
-  <div class="tool-sidebar">
-    {#each TOOL_GROUPS as group, gi}
-      {#if gi > 0}<div class="ts-sep"></div>{/if}
-      {#each group.tools as t}
-        <button class="ts-btn" class:active={tool === t.id} onclick={() => tool = t.id as Tool} title={t.label}>
-          {#if t.id === "move"}<IconPointer size={16}/>{:else if t.id === "select"}<IconSelector size={16}/>
-          {:else if t.id === "brush"}<IconBrush size={16}/>{:else if t.id === "pencil"}<IconPencil size={16}/>
-          {:else if t.id === "pen"}<IconPencil size={16}/>{:else if t.id === "eraser"}<IconEraser size={16}/>
-          {:else if t.id === "line"}<IconMinus size={16}/>{:else if t.id === "rect"}<IconSquare size={16}/>
-          {:else if t.id === "ellipse"}<IconCircle size={16}/>{:else if t.id === "arrow"}<IconArrowBadgeRight size={16}/>
-          {:else if t.id === "triangle"}<IconTriangle size={16}/>{:else if t.id === "eyedropper"}<IconColorPicker size={16}/>
-          {:else if t.id === "fill"}<IconBucketDroplet size={16}/>{:else if t.id === "text"}<IconLetterT size={16}/>
-          {/if}
-        </button>
+    <!-- ═══ LEFT TOOLBAR ═══ -->
+    <div class="tool-sidebar">
+      {#each TOOL_GROUPS as group, gi}
+        {#if gi > 0}<div class="ts-sep"></div>{/if}
+        {#each group.tools as t}
+          <button class="ts-btn" class:active={tool === t.id} onclick={() => tool = t.id as Tool} title={t.label}>
+            {#if t.id === "move"}<IconPointer size={16}/>{:else if t.id === "select"}<IconSelector size={16}/>
+            {:else if t.id === "brush"}<IconBrush size={16}/>{:else if t.id === "pencil"}<IconPencil size={16}/>
+            {:else if t.id === "pen"}<IconPencil size={16}/>{:else if t.id === "eraser"}<IconEraser size={16}/>
+            {:else if t.id === "line"}<IconMinus size={16}/>{:else if t.id === "rect"}<IconSquare size={16}/>
+            {:else if t.id === "ellipse"}<IconCircle size={16}/>{:else if t.id === "arrow"}<IconArrowBadgeRight size={16}/>
+            {:else if t.id === "triangle"}<IconTriangle size={16}/>{:else if t.id === "eyedropper"}<IconColorPicker size={16}/>
+            {:else if t.id === "fill"}<IconBucketDroplet size={16}/>{:else if t.id === "text"}<IconLetterT size={16}/>
+            {/if}
+          </button>
+        {/each}
       {/each}
-    {/each}
-    <div class="ts-sep"></div>
-    <button class="ts-btn" onclick={undo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)"><IconArrowBack size={16}/></button>
-    <button class="ts-btn" onclick={redo} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)"><IconArrowForward size={16}/></button>
-    <button class="ts-btn" onclick={clearAll} title="Clear layer"><IconTrash size={16}/></button>
-    <div class="ts-spacer"></div>
-    <!-- Color swatches -->
-    <button class="ts-swatch ts-fg" style="background:{fgColor}" onclick={() => rightPanel = 'color'} title="Foreground color"></button>
-    <button class="ts-swatch ts-bg" style="background:{bgColor2}" onclick={() => rightPanel = 'color'} title="Background color"></button>
-    <button class="ts-swap" onclick={swapColors} title="Swap (X)">
-      <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 3L4 0V2H9V4H4V6L1 3Z" fill="currentColor" transform="rotate(180 5 3)"/></svg>
-    </button>
-  </div>
-
-  <!-- ═══ CENTER ═══ -->
-  <div class="center-area">
-    <!-- Options bar -->
-    <div class="options-bar">
-      <span class="ob-tool">{tool}</span>
-      <div class="ob-sep"></div>
-      <label class="ob-label">Size
-        <input type="range" min="0.5" max="150" step="0.5" bind:value={lineWidth} class="ob-slider"/>
-        <span class="ob-val">{lineWidth.toFixed(1)}</span>
-      </label>
-      <label class="ob-label">Opacity
-        <input type="range" min="1" max="100" bind:value={opacity} class="ob-slider"/>
-        <span class="ob-val">{opacity}%</span>
-      </label>
-      {#if ["brush","pencil","pen","eraser"].includes(tool)}
-        <label class="ob-label">Hardness
-          <input type="range" min="1" max="100" bind:value={hardness} class="ob-slider"/>
-          <span class="ob-val">{hardness}</span>
-        </label>
-        <label class="ob-label">Smooth
-          <input type="range" min="0" max="1" step="0.05" bind:value={smoothing} class="ob-slider"/>
-          <span class="ob-val">{Math.round(smoothing*100)}%</span>
-        </label>
-        <label class="ob-label">Taper
-          <input type="range" min="0" max="1" step="0.05" bind:value={taper} class="ob-slider"/>
-          <span class="ob-val">{Math.round(taper*100)}%</span>
-        </label>
-        <label class="ob-check"><input type="checkbox" bind:checked={pressureSize}/> Pressure→Size</label>
-        <label class="ob-check"><input type="checkbox" bind:checked={pressureOpacity}/> Pressure→Opacity</label>
-      {/if}
-      {#if tool === "text"}
-        <label class="ob-label">Size
-          <input type="range" min="8" max="200" bind:value={fontSize} class="ob-slider"/>
-          <span class="ob-val">{fontSize}px</span>
-        </label>
-        <label class="ob-label">Font
-          <select bind:value={fontFamily} class="ob-select">
-            {#each FONT_FAMILIES as f}
-              <option value={f} style="font-family:{f}">{f}</option>
-            {/each}
-          </select>
-        </label>
-        <button class="ob-btn" class:active={fontWeight === "700"} onclick={() => fontWeight = fontWeight === "700" ? "400" : "700"} title="Bold">B</button>
-        <button class="ob-btn ob-italic" class:active={fontStyle === "italic"} onclick={() => fontStyle = fontStyle === "italic" ? "normal" : "italic"} title="Italic">I</button>
-        <div class="ob-sep"></div>
-        <button class="ob-btn" class:active={textAlign === "left"} onclick={() => textAlign = "left"} title="Align left">≡</button>
-        <button class="ob-btn" class:active={textAlign === "center"} onclick={() => textAlign = "center"} title="Align center">☰</button>
-        <button class="ob-btn" class:active={textAlign === "right"} onclick={() => textAlign = "right"} title="Align right">≡</button>
-      {/if}
-      {#if ["line","rect","ellipse","arrow","triangle"].includes(tool)}
-        <label class="ob-check"><input type="checkbox" bind:checked={fillShapes}/> Fill</label>
-      {/if}
-      <div class="ob-spacer"></div>
-      <!-- Quick brush presets -->
-      {#if ["brush","pencil","pen","eraser"].includes(tool)}
-        <div class="ob-presets">
-          {#each filteredPresets as p, i}
-            <button class="ob-preset" class:active={activePresetIdx === BRUSH_PRESETS.indexOf(p)} onclick={() => applyPreset(p)} title={p.name}>
-              <span style="font-size:{Math.min(14, Math.max(9, p.size / 2))}px">{p.icon}</span>
-            </button>
-          {/each}
-        </div>
-      {/if}
+      <div class="ts-sep"></div>
+      <button class="ts-btn" onclick={undo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)"><IconArrowBack size={16}/></button>
+      <button class="ts-btn" onclick={redo} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)"><IconArrowForward size={16}/></button>
+      <button class="ts-btn" onclick={clearAll} title="Clear layer"><IconTrash size={16}/></button>
+      <div class="ts-spacer"></div>
+      <button class="ts-swatch ts-fg" style="background:{fgColor}" onclick={() => rightPanel = 'color'} title="Foreground color"></button>
+      <button class="ts-swatch ts-bg" style="background:{bgColor2}" onclick={() => rightPanel = 'color'} title="Background color"></button>
+      <button class="ts-swap" onclick={swapColors} title="Swap (X)">
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 3L4 0V2H9V4H4V6L1 3Z" fill="currentColor" transform="rotate(180 5 3)"/></svg>
+      </button>
     </div>
 
-    <!-- Rulers + Canvas -->
-    <div class="canvas-container">
-      {#if settings.showRulers}
-        <!-- Top ruler -->
-        <div class="ruler ruler-h">
-          <canvas class="ruler-canvas" use:rulerHAction={{ zoom, panX, w }}></canvas>
-        </div>
-        <!-- Left ruler -->
-        <div class="ruler ruler-v">
-          <canvas class="ruler-canvas" use:rulerVAction={{ zoom, panY, h }}></canvas>
-        </div>
-        <div class="ruler-corner"></div>
-      {/if}
+    <!-- ═══ CENTER ═══ -->
+    <div class="center-area">
+      <div class="options-bar">
+        <span class="ob-tool">{tool}</span>
+        <div class="ob-sep"></div>
+        <label class="ob-label">Size
+          <input type="range" min="0.5" max="150" step="0.5" bind:value={lineWidth} class="ob-slider"/>
+          <span class="ob-val">{lineWidth.toFixed(1)}</span>
+        </label>
+        <label class="ob-label">Opacity
+          <input type="range" min="1" max="100" bind:value={opacity} class="ob-slider"/>
+          <span class="ob-val">{opacity}%</span>
+        </label>
+        {#if ["brush","pencil","pen","eraser"].includes(tool)}
+          <label class="ob-label">Hardness
+            <input type="range" min="1" max="100" bind:value={hardness} class="ob-slider"/>
+            <span class="ob-val">{hardness}</span>
+          </label>
+          <label class="ob-label">Smooth
+            <input type="range" min="0" max="1" step="0.05" bind:value={smoothing} class="ob-slider"/>
+            <span class="ob-val">{Math.round(smoothing*100)}%</span>
+          </label>
+          <label class="ob-label">Taper
+            <input type="range" min="0" max="1" step="0.05" bind:value={taper} class="ob-slider"/>
+            <span class="ob-val">{Math.round(taper*100)}%</span>
+          </label>
+          <label class="ob-check"><input type="checkbox" bind:checked={pressureSize}/> Pressure→Size</label>
+          <label class="ob-check"><input type="checkbox" bind:checked={pressureOpacity}/> Pressure→Opacity</label>
+        {/if}
+        {#if tool === "text"}
+          <label class="ob-label">Size
+            <input type="range" min="8" max="200" bind:value={fontSize} class="ob-slider"/>
+            <span class="ob-val">{fontSize}px</span>
+          </label>
+          <label class="ob-label">Font
+            <select bind:value={fontFamily} class="ob-select">
+              {#each FONT_FAMILIES as f}
+                <option value={f} style="font-family:{f}">{f}</option>
+              {/each}
+            </select>
+          </label>
+          <button class="ob-btn" class:active={fontWeight === "700"} onclick={() => fontWeight = fontWeight === "700" ? "400" : "700"} title="Bold">B</button>
+          <button class="ob-btn ob-italic" class:active={fontStyle === "italic"} onclick={() => fontStyle = fontStyle === "italic" ? "normal" : "italic"} title="Italic">I</button>
+          <div class="ob-sep"></div>
+          <button class="ob-btn" class:active={textAlign === "left"} onclick={() => textAlign = "left"} title="Align left">≡</button>
+          <button class="ob-btn" class:active={textAlign === "center"} onclick={() => textAlign = "center"} title="Align center">☰</button>
+          <button class="ob-btn" class:active={textAlign === "right"} onclick={() => textAlign = "right"} title="Align right">≡</button>
+        {/if}
+        {#if ["line","rect","ellipse","arrow","triangle"].includes(tool)}
+          <label class="ob-check"><input type="checkbox" bind:checked={fillShapes}/> Fill</label>
+        {/if}
+        <div class="ob-spacer"></div>
+        {#if ["brush","pencil","pen","eraser"].includes(tool)}
+          <div class="ob-presets">
+            {#each filteredPresets as p, i}
+              <button class="ob-preset" class:active={activePresetIdx === BRUSH_PRESETS.indexOf(p)} onclick={() => applyPreset(p)} title={p.name}>
+                <span style="font-size:{Math.min(14, Math.max(9, p.size / 2))}px">{p.icon}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
 
-      <!-- Canvas wrap -->
-      <div
-        class="canvas-wrap"
-        bind:this={canvasWrap}
-        onwheel={onWheel}
-        class:panning={panning || spaceHeld}
-      >
-        <!-- Grid overlay -->
-        {#if settings.showGrid}
-          <svg class="grid-overlay" viewBox="0 0 {w} {h}" style="width:{w*zoom}px;height:{h*zoom}px;transform:translate({panX}px,{panY}px)">
+      <div class="canvas-container">
+        {#if settings.showRulers}
+          <div class="ruler ruler-h">
+            <canvas class="ruler-canvas" use:rulerHAction={{ zoom, panX, w }}></canvas>
+          </div>
+          <div class="ruler ruler-v">
+            <canvas class="ruler-canvas" use:rulerVAction={{ zoom, panY, h }}></canvas>
+          </div>
+          <div class="ruler-corner"></div>
+        {/if}
+
+        <div
+          class="canvas-wrap"
+          bind:this={canvasWrap}
+          onwheel={onWheel}
+          class:panning={panning || spaceHeld}
+        >
+          {#if settings.showGrid}
+            <svg class="grid-overlay" viewBox={`0 0 ${w} ${h}`} style="width:{w*zoom}px;height:{h*zoom}px;transform:translate({panX}px,{panY}px)">
+              <defs>
+                <pattern id="gridSmall" width={rulerTickStep} height={rulerTickStep} patternUnits="userSpaceOnUse">
+                  <path d={`M ${rulerTickStep} 0 L 0 0 0 ${rulerTickStep}`} fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"/>
+                </pattern>
+                <pattern id="gridLarge" width={rulerTickStep * 2} height={rulerTickStep * 2} patternUnits="userSpaceOnUse">
+                  <rect width={rulerTickStep * 2} height={rulerTickStep * 2} fill="url(#gridSmall)"/>
+                  <path d={`M ${rulerTickStep * 2} 0 L 0 0 0 ${rulerTickStep * 2}`} fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+                </pattern>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#gridLarge)"/>
+            </svg>
+          {/if}
+
+          <svg
+            bind:this={svgEl}
+            viewBox={`0 0 ${w} ${h}`}
+            width={w * zoom}
+            height={h * zoom}
+            class="draw-svg"
+            style="touch-action:none; transform: translate({panX}px, {panY}px)"
+            onpointerdown={pointerDown}
+            onpointermove={pointerMove}
+            onpointerup={pointerUp}
+            onpointerenter={() => hovering = true}
+            onpointerleave={(e) => { pointerUp(e); hovering = false; }}
+          >
             <defs>
-              <pattern id="gridSmall" width={rulerTickStep} height={rulerTickStep} patternUnits="userSpaceOnUse">
-                <path d="M {rulerTickStep} 0 L 0 0 0 {rulerTickStep}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"/>
-              </pattern>
-              <pattern id="gridLarge" width={rulerTickStep * 2} height={rulerTickStep * 2} patternUnits="userSpaceOnUse">
-                <rect width={rulerTickStep * 2} height={rulerTickStep * 2} fill="url(#gridSmall)"/>
-                <path d="M {rulerTickStep * 2} 0 L 0 0 0 {rulerTickStep * 2}" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+              <pattern id="checker" width="16" height="16" patternUnits="userSpaceOnUse">
+                <rect width="16" height="16" fill="#2a2a2a"/>
+                <rect width="8" height="8" fill="#222"/>
+                <rect x="8" y="8" width="8" height="8" fill="#222"/>
               </pattern>
             </defs>
-            <rect width="100%" height="100%" fill="url(#gridLarge)"/>
-          </svg>
-        {/if}
+            <rect width="100%" height="100%" fill={bgColor2}/>
+            {#if settings.checkerBg}
+              <rect width="100%" height="100%" fill="url(#checker)" opacity="0"/>
+            {/if}
 
-        <!-- Main SVG -->
-        <svg
-          bind:this={svgEl}
-          viewBox="0 0 {w} {h}"
-          width={w * zoom}
-          height={h * zoom}
-          class="draw-svg"
-          style="touch-action:none; transform: translate({panX}px, {panY}px)"
-          onpointerdown={pointerDown}
-          onpointermove={pointerMove}
-          onpointerup={pointerUp}
-          onpointerenter={() => hovering = true}
-          onpointerleave={(e) => { pointerUp(e); hovering = false; }}
-        >
-          <defs>
-            <pattern id="checker" width="16" height="16" patternUnits="userSpaceOnUse">
-              <rect width="16" height="16" fill="#2a2a2a"/>
-              <rect width="8" height="8" fill="#222"/>
-              <rect x="8" y="8" width="8" height="8" fill="#222"/>
-            </pattern>
-          </defs>
-          <rect width="100%" height="100%" fill={bgColor2}/>
-          {#if settings.checkerBg}
-            <rect width="100%" height="100%" fill="url(#checker)" opacity="0"/>
+            {#each layers as layer (layer.id)}
+              {#if layer.visible}
+                <g opacity={layer.opacity / 100}>
+                  {#each layer.strokes as s (s.id)}
+                    {@html renderStroke(s, false)}
+                  {/each}
+                </g>
+              {/if}
+            {/each}
+
+            {#if currentStroke}
+              {@html renderStroke(currentStroke, true)}
+            {/if}
+          </svg>
+
+          {#if hovering && !panning && svgEl}
+            {@const svgRect = svgEl.getBoundingClientRect()}
+            {@const wrapRect = canvasWrap?.getBoundingClientRect()}
+            {#if wrapRect}
+              <div
+                class="brush-cursor"
+                style="
+                  left:{cursorScreenX - wrapRect.left}px;
+                  top:{cursorScreenY - wrapRect.top}px;
+                  width:{lineWidth * zoom}px;
+                  height:{lineWidth * zoom}px;
+                  border-color:{tool === 'eraser' ? '#ff4444' : 'rgba(255,255,255,0.6)'};
+                  opacity:{drawing ? 0.3 : 0.7};
+                "
+              ></div>
+            {/if}
           {/if}
 
-          {#each layers as layer (layer.id)}
-            {#if layer.visible}
-              <g opacity={layer.opacity / 100}>
-                {#each layer.strokes as s (s.id)}
-                  {@html renderStroke(s, false)}
-                {/each}
-              </g>
+          {#if textEditing}
+            <div class="text-editor-overlay" style="left:{textEditScreenX}px;top:{textEditScreenY}px">
+              <textarea
+                bind:this={textEditEl}
+                bind:value={textEditContent}
+                onkeydown={onTextKeydown}
+                onblur={commitText}
+                class="text-editor-input"
+                style="font-size:{fontSize * zoom}px;font-family:{fontFamily};font-weight:{fontWeight};font-style:{fontStyle};text-align:{textAlign};color:{fgColor};"
+                placeholder="Type here..."
+                rows="1"
+              ></textarea>
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      <div class="status-bar">
+        <span>{w}×{h}</span>
+        <span class="sb-sep"></span>
+        <span>{cursorX}, {cursorY}</span>
+        <span class="sb-sep"></span>
+        <span>🔍 {Math.round(zoom * 100)}%</span>
+        <span class="sb-sep"></span>
+        <span>📊 P:{(pressure * 100).toFixed(0)}%</span>
+        {#if canvasRotation !== 0}
+          <span class="sb-sep"></span>
+          <span>↻ {canvasRotation.toFixed(0)}°</span>
+        {/if}
+        <div class="sb-spacer"></div>
+        <button class="sb-btn" onclick={() => zoomTo(1)}>1:1</button>
+        <button class="sb-btn" onclick={fitToScreen}>Fit</button>
+        <button class="sb-btn" onclick={() => zoomTo(Math.min(MAX_ZOOM, zoom * 2))}>+</button>
+        <button class="sb-btn" onclick={() => zoomTo(Math.max(MIN_ZOOM, zoom / 2))}>-</button>
+        <button class="sb-btn" class:active={settings.showGrid} onclick={() => settings.showGrid = !settings.showGrid} title="Toggle grid (G)"><IconGridDots size={12}/></button>
+        <button class="sb-btn" class:active={settings.showRulers} onclick={() => settings.showRulers = !settings.showRulers} title="Toggle rulers (R)"><IconRuler size={12}/></button>
+        <div class="sb-spacer"></div>
+        <span class="sb-dim">{layers.reduce((a, l) => a + l.strokes.length, 0)} strokes · {layers.length} layers</span>
+        <input class="sb-fname" bind:value={saveName} placeholder="drawing.png"/>
+        <button class="sb-btn" onclick={downloadPng}><IconDownload size={11}/> PNG</button>
+        <button class="sb-btn" onclick={downloadSvg}><IconDownload size={11}/> SVG</button>
+        <button class="sb-btn primary" onclick={saveToCloud} disabled={saving}>
+          {#if saving}…{:else}<IconUpload size={11}/> Save{/if}
+        </button>
+        {#if saveOk}<span class="sb-ok">✓</span>{/if}
+        {#if saveError}<span class="sb-err">{saveError}</span>{/if}
+      </div>
+    </div>
+
+    <!-- ═══ RIGHT PANEL ═══ -->
+    <div class="right-panel">
+      <div class="rp-tabs">
+        <button class="rp-tab" class:active={rightPanel === "brush"} onclick={() => rightPanel = "brush"}>Brush</button>
+        <button class="rp-tab" class:active={rightPanel === "color"} onclick={() => rightPanel = "color"}>Color</button>
+        <button class="rp-tab" class:active={rightPanel === "layers"} onclick={() => rightPanel = "layers"}>Layers</button>
+      </div>
+
+      <div class="rp-content">
+        {#if rightPanel === "brush"}
+          <div class="rp-cats">
+            {#each ["all","basic","paint","ink","sketch","special"] as cat}
+              <button class="rp-cat" class:active={brushCategory === cat} onclick={() => brushCategory = cat as any}>{cat}</button>
+            {/each}
+          </div>
+          <div class="rp-presets">
+            {#each filteredPresets as p}
+              {@const idx = BRUSH_PRESETS.indexOf(p)}
+              <button class="rp-preset" class:active={activePresetIdx === idx} onclick={() => applyPreset(p)}>
+                <span class="rp-pi">{p.icon}</span>
+                <div class="rp-pinfo">
+                  <span class="rp-pn">{p.name}</span>
+                  <span class="rp-ps">{p.size}px · {p.hardness}%</span>
+                </div>
+              </button>
+            {/each}
+          </div>
+          <p class="rp-heading">Advanced</p>
+          <label class="rp-slider">Taper<input type="range" min="0" max="1" step="0.05" bind:value={taper}/><span>{Math.round(taper*100)}%</span></label>
+          <label class="rp-slider">Angle<input type="range" min="-90" max="90" bind:value={brushAngle}/><span>{brushAngle}°</span></label>
+          <label class="rp-slider">Scatter<input type="range" min="0" max="3" step="0.1" bind:value={scatter}/><span>{scatter.toFixed(1)}</span></label>
+
+          <p class="rp-heading">Quick Colors</p>
+          <div class="rp-quick-colors">
+            {#each ["#000000","#ffffff","#ff0000","#ff8800","#ffff00","#00ff00","#00ccff","#0066ff","#9933ff","#ff00ff","#888888","#444444"] as c}
+              <button class="rp-qc" style="background:{c}" class:active={fgColor === c} onclick={() => { fgColor = c; }}></button>
+            {/each}
+          </div>
+
+          <p class="rp-heading">Brush Info</p>
+          <div class="rp-info-grid">
+            <span class="rp-info-label">Size</span><span class="rp-info-val">{lineWidth.toFixed(1)}px</span>
+            <span class="rp-info-label">Opacity</span><span class="rp-info-val">{opacity}%</span>
+            <span class="rp-info-label">Hardness</span><span class="rp-info-val">{hardness}%</span>
+            <span class="rp-info-label">Smoothing</span><span class="rp-info-val">{Math.round(smoothing*100)}%</span>
+            <span class="rp-info-label">Taper</span><span class="rp-info-val">{Math.round(taper*100)}%</span>
+            <span class="rp-info-label">P→Size</span><span class="rp-info-val">{pressureSize ? 'On' : 'Off'}</span>
+            <span class="rp-info-label">P→Opacity</span><span class="rp-info-val">{pressureOpacity ? 'On' : 'Off'}</span>
+          </div>
+
+        {:else if rightPanel === "color"}
+          <ColorPicker bind:value={fgColor}/>
+          <div class="rp-heading" style="margin-top:8px">BG Color</div>
+          <ColorPicker bind:value={bgColor2}/>
+
+        {:else if rightPanel === "layers"}
+          <div class="rp-layer-actions">
+            <button class="rp-layer-btn" onclick={addLayer}>+ New</button>
+            <button class="rp-layer-btn" onclick={removeLayer} disabled={layers.length <= 1}>Delete</button>
+            <button class="rp-layer-btn" onclick={moveLayerUp} disabled={activeLayerIdx >= layers.length - 1}>↑</button>
+            <button class="rp-layer-btn" onclick={moveLayerDown} disabled={activeLayerIdx <= 0}>↓</button>
+          </div>
+          {#each [...layers].reverse() as layer, ri (layer.id)}
+            {@const idx = layers.length - 1 - ri}
+            <div class="rp-layer" class:active={idx === activeLayerIdx} onclick={() => activeLayerIdx = idx} role="button" tabindex="-1">
+              <button class="rp-lvis" onclick={(e) => { e.stopPropagation(); layer.visible = !layer.visible; layers = [...layers]; }}>
+                {layer.visible ? "👁" : "—"}
+              </button>
+              <span class="rp-lname">{layer.name}</span>
+              <span class="rp-lcount">{layer.strokes.length}</span>
+            </div>
+            {#if idx === activeLayerIdx}
+              <label class="rp-slider rp-lay-opacity">Opacity
+                <input type="range" min="1" max="100" bind:value={layer.opacity}/>
+                <span>{layer.opacity}%</span>
+              </label>
             {/if}
           {/each}
-
-          {#if currentStroke}
-            {@html renderStroke(currentStroke, true)}
-          {/if}
-        </svg>
-
-        <!-- Brush cursor preview -->
-        {#if hovering && !panning && svgEl}
-          {@const svgRect = svgEl.getBoundingClientRect()}
-          {@const wrapRect = canvasWrap?.getBoundingClientRect()}
-          {#if wrapRect}
-            <div
-              class="brush-cursor"
-              style="
-                left:{cursorScreenX - wrapRect.left}px;
-                top:{cursorScreenY - wrapRect.top}px;
-                width:{lineWidth * zoom}px;
-                height:{lineWidth * zoom}px;
-                border-color:{tool === 'eraser' ? '#ff4444' : 'rgba(255,255,255,0.6)'};
-                opacity:{drawing ? 0.3 : 0.7};
-              "
-            ></div>
-          {/if}
         {/if}
       </div>
     </div>
-
-    <!-- Status bar -->
-    <div class="status-bar">
-      <span>{w}×{h}</span>
-      <span class="sb-sep"></span>
-      <span>{cursorX}, {cursorY}</span>
-      <span class="sb-sep"></span>
-      <span>🔍 {Math.round(zoom * 100)}%</span>
-      <span class="sb-sep"></span>
-      <span>📊 P:{(pressure * 100).toFixed(0)}%</span>
-      {#if canvasRotation !== 0}
-        <span class="sb-sep"></span>
-        <span>↻ {canvasRotation.toFixed(0)}°</span>
-      {/if}
-      <div class="sb-spacer"></div>
-      <button class="sb-btn" onclick={() => zoomTo(1)}>1:1</button>
-      <button class="sb-btn" onclick={fitToScreen}>Fit</button>
-      <button class="sb-btn" onclick={() => zoomTo(Math.min(MAX_ZOOM, zoom * 2))}>+</button>
-      <button class="sb-btn" onclick={() => zoomTo(Math.max(MIN_ZOOM, zoom / 2))}>-</button>
-      <button class="sb-btn" class:active={settings.showGrid} onclick={() => settings.showGrid = !settings.showGrid} title="Toggle grid (G)"><IconGridDots size={12}/></button>
-      <button class="sb-btn" class:active={settings.showRulers} onclick={() => settings.showRulers = !settings.showRulers} title="Toggle rulers (R)"><IconRuler size={12}/></button>
-      <div class="sb-spacer"></div>
-      <span class="sb-dim">{layers.reduce((a, l) => a + l.strokes.length, 0)} strokes · {layers.length} layers</span>
-      <input class="sb-fname" bind:value={saveName} placeholder="drawing.png"/>
-      <button class="sb-btn" onclick={downloadPng}><IconDownload size={11}/> PNG</button>
-      <button class="sb-btn" onclick={downloadSvg}><IconDownload size={11}/> SVG</button>
-      <button class="sb-btn primary" onclick={saveToCloud} disabled={saving}>
-        {#if saving}…{:else}<IconUpload size={11}/> Save{/if}
-      </button>
-      {#if saveOk}<span class="sb-ok">✓</span>{/if}
-      {#if saveError}<span class="sb-err">{saveError}</span>{/if}
-    </div>
-  </div>
-
-  <!-- ═══ RIGHT PANEL ═══ -->
-  <div class="right-panel">
-    <div class="rp-tabs">
-      <button class="rp-tab" class:active={rightPanel === "brush"} onclick={() => rightPanel = "brush"}>Brush</button>
-      <button class="rp-tab" class:active={rightPanel === "color"} onclick={() => rightPanel = "color"}>Color</button>
-      <button class="rp-tab" class:active={rightPanel === "layers"} onclick={() => rightPanel = "layers"}>Layers</button>
-    </div>
-
-    <div class="rp-content">
-      {#if rightPanel === "brush"}
-        <!-- Brush categories -->
-        <div class="rp-cats">
-          {#each ["all","basic","paint","ink","sketch","special"] as cat}
-            <button class="rp-cat" class:active={brushCategory === cat} onclick={() => brushCategory = cat as any}>{cat}</button>
-          {/each}
-        </div>
-        <div class="rp-presets">
-          {#each filteredPresets as p}
-            {@const idx = BRUSH_PRESETS.indexOf(p)}
-            <button class="rp-preset" class:active={activePresetIdx === idx} onclick={() => applyPreset(p)}>
-              <span class="rp-pi">{p.icon}</span>
-              <div class="rp-pinfo">
-                <span class="rp-pn">{p.name}</span>
-                <span class="rp-ps">{p.size}px · {p.hardness}%</span>
-        <!-- Inline text editor -->
-        {#if textEditing}
-          <div class="text-editor-overlay" style="left:{textEditScreenX}px;top:{textEditScreenY}px">
-            <textarea
-              bind:this={textEditEl}
-              bind:value={textEditContent}
-              onkeydown={onTextKeydown}
-              onblur={commitText}
-              class="text-editor-input"
-              style="font-size:{fontSize * zoom}px;font-family:{fontFamily};font-weight:{fontWeight};font-style:{fontStyle};text-align:{textAlign};color:{fgColor};"
-              placeholder="Type here..."
-              rows="1"
-            ></textarea>
-          </div>
-        {/if}
-      </div>
-            </button>
-          {/each}
-        </div>
-        <p class="rp-heading">Advanced</p>
-        <label class="rp-slider">Taper<input type="range" min="0" max="1" step="0.05" bind:value={taper}/><span>{Math.round(taper*100)}%</span></label>
-        <label class="rp-slider">Angle<input type="range" min="-90" max="90" bind:value={brushAngle}/><span>{brushAngle}°</span></label>
-        <label class="rp-slider">Scatter<input type="range" min="0" max="3" step="0.1" bind:value={scatter}/><span>{scatter.toFixed(1)}</span></label>
-
-        <p class="rp-heading">Quick Colors</p>
-        <div class="rp-quick-colors">
-          {#each ["#000000","#ffffff","#ff0000","#ff8800","#ffff00","#00ff00","#00ccff","#0066ff","#9933ff","#ff00ff","#888888","#444444"] as c}
-            <button class="rp-qc" style="background:{c}" class:active={fgColor === c} onclick={() => { fgColor = c; }}></button>
-          {/each}
-        </div>
-
-        <p class="rp-heading">Brush Info</p>
-        <div class="rp-info-grid">
-          <span class="rp-info-label">Size</span><span class="rp-info-val">{lineWidth.toFixed(1)}px</span>
-          <span class="rp-info-label">Opacity</span><span class="rp-info-val">{opacity}%</span>
-          <span class="rp-info-label">Hardness</span><span class="rp-info-val">{hardness}%</span>
-          <span class="rp-info-label">Smoothing</span><span class="rp-info-val">{Math.round(smoothing*100)}%</span>
-          <span class="rp-info-label">Taper</span><span class="rp-info-val">{Math.round(taper*100)}%</span>
-          <span class="rp-info-label">P→Size</span><span class="rp-info-val">{pressureSize ? 'On' : 'Off'}</span>
-          <span class="rp-info-label">P→Opacity</span><span class="rp-info-val">{pressureOpacity ? 'On' : 'Off'}</span>
-        </div>
-
-      {:else if rightPanel === "color"}
-        <ColorPicker bind:value={fgColor}/>
-        <div class="rp-heading" style="margin-top:8px">BG Color</div>
-        <ColorPicker bind:value={bgColor2}/>
-
-      {:else if rightPanel === "layers"}
-        <div class="rp-layer-actions">
-          <button class="rp-layer-btn" onclick={addLayer}>+ New</button>
-          <button class="rp-layer-btn" onclick={removeLayer} disabled={layers.length <= 1}>Delete</button>
-          <button class="rp-layer-btn" onclick={moveLayerUp} disabled={activeLayerIdx >= layers.length - 1}>↑</button>
-          <button class="rp-layer-btn" onclick={moveLayerDown} disabled={activeLayerIdx <= 0}>↓</button>
-        </div>
-        {#each [...layers].reverse() as layer, ri (layer.id)}
-          {@const idx = layers.length - 1 - ri}
-          <div class="rp-layer" class:active={idx === activeLayerIdx} onclick={() => activeLayerIdx = idx} role="button" tabindex="-1">
-            <button class="rp-lvis" onclick={(e) => { e.stopPropagation(); layer.visible = !layer.visible; layers = [...layers]; }}>
-              {layer.visible ? "👁" : "—"}
-            </button>
-            <span class="rp-lname">{layer.name}</span>
-            <span class="rp-lcount">{layer.strokes.length}</span>
-          </div>
-          {#if idx === activeLayerIdx}
-            <label class="rp-slider rp-lay-opacity">Opacity
-              <input type="range" min="1" max="100" bind:value={layer.opacity}/>
-              <span>{layer.opacity}%</span>
-            </label>
-          {/if}
-        {/each}
-      {/if}
-    </div>
-  </div>
   </div>
 </div>
 
 <style>
   .draw-root { display: flex; flex-direction: column; height: 100%; width: 100%; overflow: hidden; background: #1a1a1e; user-select: none; }
 
-  /* ═══ TOP MENU BAR ═══ */
   .menu-bar { display: flex; align-items: center; background: #1e1e22; border-bottom: 1px solid #333; height: 26px; flex-shrink: 0; padding: 0 4px; }
   .mb-item { position: relative; padding: 3px 8px; font-size: 11px; color: #aaa; cursor: pointer; border-radius: 3px; transition: .1s; }
   .mb-item:hover { background: #333; color: #fff; }
@@ -1192,10 +1183,8 @@
   .mb-title { font-size: 10px; color: #555; font-family: 'Geist Mono', monospace; }
   .mb-sep-inline { width: 1px; height: 12px; background: #444; margin: 0 6px; }
 
-  /* ═══ MAIN ROW ═══ */
   .main-row { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 
-  /* ═══ LEFT TOOLBAR ═══ */
   .tool-sidebar { display: flex; flex-direction: column; align-items: center; width: 40px; background: #222226; border-right: 1px solid #333; padding: 4px 0; gap: 1px; flex-shrink: 0; }
   .ts-sep { width: 22px; height: 1px; background: #444; margin: 3px 0; }
   .ts-btn { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 5px; background: none; border: none; color: #777; cursor: pointer; transition: .1s; }
@@ -1210,7 +1199,6 @@
   .ts-swap { background: none; border: none; color: #555; cursor: pointer; padding: 2px; margin-top: 2px; }
   .ts-swap:hover { color: #aaa; }
 
-  /* ═══ CENTER ═══ */
   .center-area { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 
   .options-bar { display: flex; align-items: center; gap: 8px; padding: 3px 10px; background: #26262a; border-bottom: 1px solid #333; min-height: 30px; flex-shrink: 0; overflow-x: auto; }
@@ -1227,7 +1215,6 @@
   .ob-preset:hover { border-color: #6366f1; color: #fff; }
   .ob-preset.active { border-color: #6366f1; background: #2a2a3e; color: #fff; }
 
-  /* ═══ Canvas container (rulers + canvas) ═══ */
   .canvas-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; position: relative; }
   .ruler { background: #26262a; overflow: hidden; flex-shrink: 0; }
   .ruler-h { height: 20px; width: 100%; }
@@ -1242,7 +1229,21 @@
 
   .brush-cursor { position: absolute; pointer-events: none; border: 1.5px solid; border-radius: 50%; transform: translate(-50%, -50%); z-index: 10; transition: width .05s, height .05s, opacity .15s; }
 
-  /* ═══ Status bar ═══ */
+  .text-editor-overlay { position: absolute; z-index: 20; pointer-events: auto; transform: translate(0, 0); }
+  .text-editor-input {
+    min-width: 180px;
+    min-height: 36px;
+    padding: 6px 8px;
+    background: rgba(20, 20, 24, 0.92);
+    border: 1px solid #6366f1;
+    border-radius: 8px;
+    outline: none;
+    resize: both;
+    color: inherit;
+    line-height: 1.2;
+    box-shadow: 0 12px 32px rgba(0,0,0,.35);
+  }
+
   .status-bar { display: flex; align-items: center; gap: 5px; padding: 2px 10px; background: #26262a; border-top: 1px solid #333; font-size: 10px; color: #555; font-family: 'Geist Mono', monospace; min-height: 24px; flex-shrink: 0; }
   .sb-sep { width: 1px; height: 10px; background: #3a3a3a; }
   .sb-spacer { flex: 1; }
@@ -1258,7 +1259,6 @@
   .sb-ok { color: #4ade80; }
   .sb-err { color: #f87171; }
 
-  /* ═══ RIGHT PANEL ═══ */
   .right-panel { width: 210px; flex-shrink: 0; background: #222226; border-left: 1px solid #333; display: flex; flex-direction: column; overflow: hidden; }
   .rp-tabs { display: flex; border-bottom: 1px solid #333; }
   .rp-tab { flex: 1; padding: 5px 0; background: none; border: none; color: #555; font-size: 10px; font-weight: 700; cursor: pointer; border-bottom: 2px solid transparent; transition: .1s; text-transform: uppercase; letter-spacing: .04em; }
@@ -1268,13 +1268,11 @@
   .rp-heading { font-size: 9px; font-weight: 700; color: #444; text-transform: uppercase; letter-spacing: .08em; margin: 6px 0 3px; }
   .rp-heading:first-child { margin-top: 0; }
 
-  /* Brush categories */
   .rp-cats { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 4px; }
   .rp-cat { padding: 2px 6px; border-radius: 3px; background: #2a2a2e; border: 1px solid #333; color: #666; font-size: 9px; cursor: pointer; text-transform: capitalize; transition: .1s; }
   .rp-cat:hover { border-color: #555; color: #aaa; }
   .rp-cat.active { border-color: #6366f1; color: #fff; background: #2a2a3e; }
 
-  /* Presets */
   .rp-presets { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
   .rp-preset { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 5px; background: #2a2a2e; border: 1px solid #333; color: #999; cursor: pointer; font-size: 10px; transition: .1s; text-align: left; }
   .rp-preset:hover { border-color: #555; background: #303034; }
@@ -1284,12 +1282,10 @@
   .rp-pn { font-weight: 600; font-size: 10px; }
   .rp-ps { font-size: 9px; color: #555; font-family: 'Geist Mono', monospace; }
 
-  /* Sliders */
   .rp-slider { display: flex; align-items: center; gap: 4px; font-size: 10px; color: #666; }
   .rp-slider input[type="range"] { flex: 1; accent-color: #6366f1; height: 3px; }
   .rp-slider span { font-size: 9px; color: #555; font-family: 'Geist Mono', monospace; min-width: 28px; text-align: right; }
 
-  /* Color */
   .rp-color-preview { position: relative; width: 50px; height: 50px; margin: 0 auto 6px; }
   .rp-fg-big { position: absolute; top: 0; left: 0; width: 36px; height: 36px; border-radius: 4px; border: 2px solid #555; z-index: 2; }
   .rp-bg-big { position: absolute; bottom: 0; right: 0; width: 24px; height: 24px; border-radius: 3px; border: 2px solid #444; z-index: 1; }
@@ -1301,7 +1297,6 @@
   .rp-rswatch { width: 16px; height: 16px; border-radius: 3px; border: 1px solid #444; cursor: pointer; transition: .1s; }
   .rp-rswatch:hover { border-color: #888; transform: scale(1.2); }
 
-  /* Layers */
   .rp-layer-actions { display: flex; gap: 3px; margin-bottom: 4px; }
   .rp-layer-btn { flex: 1; padding: 3px; border-radius: 3px; background: #2a2a2e; border: 1px solid #444; color: #777; font-size: 9px; cursor: pointer; transition: .1s; }
   .rp-layer-btn:hover { border-color: #6366f1; color: #ccc; }
@@ -1314,13 +1309,11 @@
   .rp-lcount { font-size: 9px; color: #444; }
   .rp-lay-opacity { padding: 2px 0; }
 
-  /* Quick colors */
   .rp-quick-colors { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
   .rp-qc { width: 100%; aspect-ratio: 1; border-radius: 3px; border: 1px solid #444; cursor: pointer; transition: .1s; }
   .rp-qc:hover { border-color: #888; transform: scale(1.1); }
   .rp-qc.active { border-color: #fff; box-shadow: 0 0 0 1px #6366f1; }
 
-  /* Info grid */
   .rp-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; font-size: 10px; }
   .rp-info-label { color: #555; }
   .rp-info-val { color: #999; text-align: right; font-family: 'Geist Mono', monospace; font-size: 9px; }
