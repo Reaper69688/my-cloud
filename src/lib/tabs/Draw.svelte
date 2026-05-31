@@ -495,7 +495,8 @@
             <line x1={sa.x1} y1={sa.y1} x2={sa.x2} y2={sa.y2} stroke={s.color} stroke-width={s.width} stroke-linecap="round" opacity={s.opacity}/>
             <polygon points={`${sa.x2},${sa.y2} ${sa.headX1},${sa.headY1} ${sa.headX2},${sa.headY2}`} fill={s.color} opacity={s.opacity}/>
           {:else if s.shapeType === 'triangle'}
-            <polygon points={Math.min(s.sx,s.ex)+Math.abs(s.ex-s.sx)/2},{Math.min(s.sy,s.ey)} {Math.min(s.sx,s.ex)},{s.ey} {s.ex},{s.ey}
+            {@const triPts = `${(s.sx!+s.ex!)/2},${Math.min(s.sy!,s.ey!)} ${Math.min(s.sx!,s.ex!)},${s.ey} ${s.ex},${s.ey}`}
+            <polygon points={triPts}
               fill={s.fill ? s.color : 'none'} stroke={s.fill ? 'none' : s.color} stroke-width={s.width} stroke-linejoin="round" opacity={s.opacity}/>
           {/if}
         {:else if s.d}
@@ -531,7 +532,8 @@
             <line x1={sa.x1} y1={sa.y1} x2={sa.x2} y2={sa.y2} stroke={currentStroke.color} stroke-width={currentStroke.width/2} stroke-linecap="round" opacity="0.5"/>
             <polygon points={`${sa.x2},${sa.y2} ${sa.headX1},${sa.headY1} ${sa.headX2},${sa.headY2}`} fill={currentStroke.color} opacity="0.5"/>
           {:else if currentStroke.shapeType === 'triangle'}
-            <polygon points={Math.min(currentStroke.sx,currentStroke.ex)+Math.abs(currentStroke.ex-currentStroke.sx)/2},{Math.min(currentStroke.sy,currentStroke.ey)} {Math.min(currentStroke.sx,currentStroke.ex)},{currentStroke.ey} {currentStroke.ex},{currentStroke.ey}
+            {@const triPts = `${(currentStroke.sx!+currentStroke.ex!)/2},${Math.min(currentStroke.sy!,currentStroke.ey!)} ${Math.min(currentStroke.sx!,currentStroke.ex!)},${currentStroke.ey} ${currentStroke.ex},${currentStroke.ey}`}
+            <polygon points={triPts}
               fill={currentStroke.fill ? currentStroke.color : 'none'} stroke={currentStroke.fill ? 'none' : currentStroke.color}
               stroke-width={currentStroke.width/2} stroke-linejoin="round" opacity="0.5"/>
           {/if}
@@ -564,7 +566,11 @@
       <button class="action-btn" onclick={downloadPng} title="Download PNG"><IconDownload size={14}/> PNG</button>
       <button class="action-btn" onclick={downloadSvg} title="Download SVG"><IconDownload size={14}/> SVG</button>
       <button class="action-btn primary" onclick={saveToCloud} disabled={saving} title="Save to your cloud">
-        {saving ? "Saving…" : <svelte:fragment><IconUpload size={14}/> Save</svelte:fragment>}
+        {#if saving}
+          Saving…
+        {:else}
+          <IconUpload size={14}/> Save
+        {/if}
       </button>
     </div>
   </div>
