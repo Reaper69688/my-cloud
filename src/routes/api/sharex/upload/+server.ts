@@ -24,34 +24,6 @@ function jsonResp(data: object, status = 200) {
   });
 }
 
-function parseBoundary(ct: string | null): string | null {
-  if (!ct) return null;
-  const m = ct.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-  return m ? (m[1] ?? m[2]).trim() : null;
-}
-
-function extractFile(body: Buffer, ct: string | null) {
-  const boundary = parseBoundary(ct);
-  if (!boundary) return null;
-
-  const first = Buffer.from(`--${boundary}`);
-
-  const pos = body.indexOf(first);
-  if (pos === -1) return null;
-
-  const part = body.slice(pos);
-  const hEnd = part.indexOf('\r\n\r\n');
-  if (hEnd === -1) return null;
-
-  const headers = part.slice(0, hEnd).toString('utf8');
-  const data = part.slice(hEnd + 4);
-
-  const match = headers.match(/filename="([^"]+)"/i);
-  if (!match) return null;
-
-  return { filename: match[1], data };
-}
-
 async function getOrCreateSharexFolder(registry: Record<string, any>): Promise<string> {
   const existing = Object.values(registry).find(
     (r: any) => r._type === 'folder' && r.name === 'sharex'
@@ -79,22 +51,24 @@ export const POST: RequestHandler = async ({ request }) => {
     const rec = await getRecordByApiKey(apiKey);
     if (!rec) return jsonResp({ error: 'Forbidden' }, 403);
 
-    const body = Buffer.from(await request.arrayBuffer());
-    const ct = request.headers.get('content-type');
-
-    const file = extractFile(body, ct);
+    const formData = await request.formData();
+    const file = formData.get('file') as File | null;
     if (!file) return jsonResp({ error: 'No file' }, 400);
 
-    const fileName = file.filename.split('/').pop()!;
+    const fileName = file.name.split('/').pop()!;
+    const fileBytes = new Uint8Array(await file.arrayBuffer());
     const time = new Date().toISOString();
-    const type = 'application/octet-stream';
-    const totalBytes = file.data.length;
+    const type = file.type || 'application/octet-stream';
+    const totalBytes = fileBytes.length;
+
+    if (totalBytes === 0) return jsonResp({ error: 'Empty file' }, 400);
 
     const nChunks = Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
     const telegramChunks: { index: number; file_id: string; message_id: number; size: number }[] = [];
 
     for (let i = 0; i < nChunks; i++) {
-      const slice = file.data.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      const start = i * CHUNK_SIZE;
+      const slice = fileBytes.slice(start, Math.min(start + CHUNK_SIZE, totalBytes));
       const { message_id, file_id } = await uploadBytesToTelegram(slice, `${fileName}.chunk${i}`);
       telegramChunks.push({ index: i, file_id, message_id, size: slice.length });
     }
@@ -141,4 +115,3 @@ export const POST: RequestHandler = async ({ request }) => {
     return jsonResp({ error: err?.message ?? 'Internal error' }, 500);
   }
 };
-
