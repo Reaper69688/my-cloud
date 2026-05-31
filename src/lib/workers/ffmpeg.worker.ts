@@ -24,6 +24,7 @@ self.onmessage = async (e: MessageEvent) => {
       await ffmpeg.load({
         coreURL: payload.coreUrl,
         wasmURL: payload.wasmUrl,
+        classWorkerURL: payload.workerUrl,
       });
 
       self.postMessage({ id, type: 'ready' });

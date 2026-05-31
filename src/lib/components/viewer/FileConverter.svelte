@@ -10,14 +10,17 @@
 
   let { file, url, apiKey = '' }: { file: FileRecord; url: string | null; apiKey?: string } = $props();
 
-  // Determine which engine to use
+  const AUDIO_VIDEO_EXTS = new Set(['mp3','mp4','webm','mkv','mov','avi','ogg','wav','flac','aac','opus','m4a','wma','3gp','ts','mts','m2ts','ogv','webm']);
+  const IMAGE_EXTS = new Set(['png','jpg','jpeg','webp','gif','avif','tiff','tif','bmp','ico','svg','heic','heif','raw','cr2','nef','arw']);
+
   function engineFor(f: FileRecord): 'ffmpeg' | 'imagemagick' | 'native' | null {
     const t = f.type;
-    if (t.startsWith('video/') || t.startsWith('audio/')) return 'ffmpeg';
-    if (t.startsWith('image/')) {
-      // Simple formats browser can handle natively
+    const ext = f.fileName.split('.').pop()?.toLowerCase() ?? '';
+    if (t.startsWith('video/') || t.startsWith('audio/') || AUDIO_VIDEO_EXTS.has(ext)) return 'ffmpeg';
+    if (t.startsWith('image/') || IMAGE_EXTS.has(ext)) {
       if (['image/png','image/jpeg','image/webp','image/gif'].includes(t)) return 'native';
-      return 'imagemagick'; // RAW, TIFF, AVIF, etc
+      if (!t.startsWith('image/') && ['png','jpg','jpeg','webp','gif'].includes(ext)) return 'native';
+      return 'imagemagick';
     }
     return null;
   }
@@ -42,11 +45,16 @@
   let ffmpegReady = $state(false);
   let ffmpegUrls: Record<string, string> = {};
   let imageMagickReady = $state(false);
+  let imageMagickUrls: Record<string, string> = {};
+  let imageMagickInited = $state(false);
 
   let outputFormats = $derived.by(() => {
     const t = file.type;
-    if (t.startsWith('video/')) return VIDEO_FORMATS;
-    if (t.startsWith('audio/')) return AUDIO_FORMATS;
+    const ext = file.fileName.split('.').pop()?.toLowerCase() ?? '';
+    const isVideo = t.startsWith('video/') || (engine === 'ffmpeg' && ['mp4','webm','mkv','mov','avi','ts','mts'].includes(ext));
+    const isAudio = t.startsWith('audio/') || (engine === 'ffmpeg' && !isVideo && AUDIO_VIDEO_EXTS.has(ext));
+    if (isVideo) return VIDEO_FORMATS;
+    if (isAudio) return AUDIO_FORMATS;
     if (engine === 'native') return IMAGE_FORMATS_NATIVE;
     if (engine === 'imagemagick') return IMAGE_FORMATS_MAGICK;
     return [];
@@ -85,6 +93,8 @@
     converting = false;
   }
 
+  let ffmpegInited = $state(false);
+
   async function convertFfmpeg() {
     if (!url || !ffmpegReady) return;
     converting = true; error = null; resultUrl = null; progress = 0;
@@ -94,10 +104,10 @@
       const inputName = file.fileName;
       const outputName = `${baseName(file.fileName)}.${outputFormat}`;
 
-      // Initialize worker with cached URLs if not already done
       const worker = getFfmpegWorker();
-      if (!ffmpegReady) {
-        await worker.send('init', { coreUrl: ffmpegUrls.js, wasmUrl: ffmpegUrls.wasm });
+      if (!ffmpegInited) {
+        await worker.send('init', { coreUrl: ffmpegUrls.js, wasmUrl: ffmpegUrls.wasm, workerUrl: ffmpegUrls.worker });
+        ffmpegInited = true;
       }
 
       const result = await worker.send<Uint8Array>(
@@ -122,12 +132,17 @@
   }
 
   async function convertImageMagick() {
-    if (!url) return;
+    if (!url || !imageMagickReady) return;
     converting = true; error = null; resultUrl = null;
     try {
       const res = await fetch(url);
       const inputData = new Uint8Array(await res.arrayBuffer());
       const worker = getImageMagickWorker();
+
+      if (!imageMagickInited) {
+        await worker.send('init', { moduleUrl: imageMagickUrls.js, wasmUrl: imageMagickUrls.wasm });
+        imageMagickInited = true;
+      }
 
       const result = await worker.send<Uint8Array>(
         'convert',
@@ -195,7 +210,7 @@
   {:else if engine === 'imagemagick' && !imageMagickReady}
     <WasmLoader
       entry={WASM_REGISTRY.imagemagick}
-      onready={() => { imageMagickReady = true; }}
+      onready={(urls) => { imageMagickUrls = urls; imageMagickReady = true; }}
     />
 
   {:else}

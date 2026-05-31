@@ -27,9 +27,23 @@
     if (f) pickFile(f);
   }
 
+  function guessMime(name: string, fallback: string): string {
+    if (fallback && fallback !== 'application/octet-stream') return fallback;
+    const ext = name.split('.').pop()?.toLowerCase() ?? '';
+    const map: Record<string, string> = {
+      mp3:'audio/mpeg', mp4:'video/mp4', webm:'video/webm', mkv:'video/x-matroska',
+      mov:'video/quicktime', avi:'video/x-msvideo', ogg:'audio/ogg', wav:'audio/wav',
+      flac:'audio/flac', aac:'audio/aac', opus:'audio/opus', m4a:'audio/mp4',
+      png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp',
+      gif:'image/gif', avif:'image/avif', tiff:'image/tiff', tif:'image/tiff',
+      bmp:'image/bmp', svg:'image/svg+xml',
+    };
+    return map[ext] || 'application/octet-stream';
+  }
+
   let fakeRecord = $derived(pickedFile ? {
     fileName: pickedFile.name,
-    type: pickedFile.type || 'application/octet-stream',
+    type: guessMime(pickedFile.name, pickedFile.type),
     totalBytes: pickedFile.size,
     metaFileId: '',
   } : null);
